@@ -89,7 +89,7 @@ server.registerTool(
   {
     title: "Flow status",
     description:
-      "Check the Flow Chrome session (signed in, project open, plan, credits left) and the generation queue. Call this first; it says what the user must fix before generating, and returns the prompt playbook.",
+      "Check the Flow browser session (signed in, project open, plan, credits left), saved global defaults (`defaults`), and the generation queue. Call this first; it says what the user must fix before generating, and returns the prompt playbook.",
     inputSchema: shapes.status,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -97,11 +97,23 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_defaults",
+  {
+    title: "Global Flow generation defaults",
+    description:
+      "Get, set, or clear the user's persistent global rules (~/.flow-mcp/defaults.json) for video and image generation (model, duration, resolution, download_quality, aspect_ratio, quantity, max_credits, concurrency). Any field saved globally is applied automatically on future flow_generate calls, while any field NOT saved globally is enforced and must be asked from the user.",
+    inputSchema: shapes.defaults,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.defaults(args)),
+);
+
+server.registerTool(
   "flow_generate",
   {
     title: "Queue Flow generations",
     description:
-      "Queue one clip or image per scene in the open Flow project using Flow's normal composer (Flow Agent off). Before queueing, always confirm unspecified settings with the user — for videos: model, clip length (`duration`), generation resolution (`360p`/`720p`), `download_quality` (`original`/`720p`/`1080p`/`upscaled`), quantity (`scenes` count and `variants` x1-x4), `concurrency` (1-4), and expected credits; for images: model (Nano Banana 2.1 / Pro / 2 Lite), `aspect_ratio`, `download_quality` (`original` 1K / `upscaled` 2K), quantity (`scenes` count and `variants` x1-x4), and `concurrency` (1-4). Defaults to one at a time with human-like pauses, or set `concurrency` (2-4) to overlap independent non-chained scenes while still checking Flow's upfront max_credits quote on every scene. Returns job ids immediately; use flow_wait for results.",
+      "Queue clips or images in the open Flow project using Flow's normal composer (Flow Agent off). Automatically merges saved global rules (from flow_defaults) with explicit args, and REFUSES the call if any required setting is still unset — ask the user ONLY for settings not saved globally. Supports unlimited `quantity` (1-100): values above Flow's x4 UI limit are automatically split into parallel x4 batches (e.g. quantity=10 -> 4+4+2) numbered -v1..-v10. Set `concurrency` (2-4) to overlap independent non-chained scenes while checking Flow's upfront max_credits quote on every submission. Returns job ids immediately; use flow_wait for results.",
     inputSchema: shapes.generate,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },

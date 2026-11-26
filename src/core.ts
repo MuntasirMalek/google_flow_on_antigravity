@@ -8,6 +8,7 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
+import { clearDefaults, DEFAULTS_FILE, loadDefaults, resolveSceneSettings, splitQuantity, updateDefaults } from "./defaults.js";
 import { characterLook, createCharacter, createProject, downloadAsset, downloadCollection, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration, runParallelGenerations } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
 import { BIN, COMPUTER, moveToBin } from "./platform.js";
@@ -32,8 +33,9 @@ const sceneSchema = z.object({
   aspect_ratio: z.enum(["16:9", "9:16", "1:1", "4:3", "3:4"]).optional().describe("Video supports 16:9 and 9:16 only."),
   duration: z.number().int().min(3).max(15).optional().describe("Video length in seconds. Omni 1.2 Flash: any whole second from 3 to 15. Omni 1.1 Flash: 4, 6, 8 or 10. Veo 3.1 clips are fixed at 8 s."),
   resolution: z.enum(["360p", "720p"]).optional().describe("Video resolution. Omni models only."),
-  max_credits: z.number().int().min(0).default(25).describe("Safety cap: the scene is skipped (nothing spent) if Flow quotes more credits than this."),
-  variants: z.number().int().min(1).max(4).optional().describe("Outputs per prompt (each one spends credits). Default 1."),
+  max_credits: z.number().int().min(0).optional().describe("Safety cap per Flow submission (up to x4 takes): the submission is skipped (nothing spent) if Flow quotes more credits than this. Defaults to 0 for images, or video.max_credits / 25 for videos."),
+  quantity: z.number().int().min(1).max(100).optional().describe("How many takes to generate for this prompt (1-100). Flow caps a single submission at x4; values above 4 are automatically split into parallel x4 batches (e.g. quantity=10 -> 4+4+2) numbered -v1..-v10."),
+  variants: z.number().int().min(1).max(100).optional().describe("Alias for `quantity` (1-100; values >4 auto-split into parallel x4 batches)."),
   first_frame: z
     .string()
     .optional()
@@ -125,6 +127,33 @@ const captionFields = {
 
 export const shapes = {
   status: { detailed: z.boolean().default(true).describe("false skips the plan/credits readout, which briefly opens Flow's account panel.") },
+  defaults: {
+    action: z.enum(["get", "set", "clear"]).default("get").describe("'get' reads saved global defaults, 'set' saves or updates any subset of global rules, 'clear' removes them."),
+    concurrency: z.number().int().min(1).max(4).optional().describe("Global default parallel Flow submissions (1-4)."),
+    video: z
+      .object({
+        model: z.string().min(1).optional(),
+        aspect_ratio: z.enum(["16:9", "9:16"]).optional(),
+        duration: z.number().int().min(3).max(15).optional(),
+        resolution: z.enum(["360p", "720p"]).optional(),
+        download_quality: downloadQualitySchema.optional(),
+        quantity: z.number().int().min(1).max(100).optional(),
+        max_credits: z.number().int().min(0).optional(),
+      })
+      .optional()
+      .describe("Global default settings for video scenes."),
+    image: z
+      .object({
+        model: z.string().min(1).optional(),
+        aspect_ratio: z.enum(["16:9", "9:16", "1:1", "4:3", "3:4"]).optional(),
+        download_quality: z.enum(["original", "upscaled"]).optional(),
+        quantity: z.number().int().min(1).max(100).optional(),
+      })
+      .optional()
+      .describe("Global default settings for image scenes."),
+    scope: z.enum(["all", "video", "image", "concurrency"]).optional().describe("For action='clear': which section to clear (default 'all')."),
+    keys: z.array(z.string().min(1)).optional().describe("For action='clear': specific field names to clear (e.g. ['resolution', 'duration']). Omit to clear the whole scope."),
+  },
   generate: {
     project: z.string().min(1).describe("Folder name for the downloaded clips, e.g. 'HotelPromo'."),
     scenes: z.array(sceneSchema).min(1).max(100),
@@ -447,6 +476,7 @@ export const jobView = ({ id, status, params, files, attempts, credits, progress
 // One implementation runs in whichever process owns the Flow tab; the other process talks to it over HTTP (remote.ts).
 export interface Core {
   status(a: Args<"status">): Promise<unknown>;
+  defaults(a: Args<"defaults">): Promise<unknown>;
   generate(a: Args<"generate">): Promise<unknown>;
   wait(a: Args<"wait">): Promise<unknown>;
   cancel(a: Args<"cancel">): Promise<unknown>;
@@ -535,7 +565,13 @@ export class LocalCore implements Core {
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);
-    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, jobs: this.queue.list().map(jobView) };
+    return { flow, defaults: loadDefaults(), pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, jobs: this.queue.list().map(jobView) };
+  }
+
+  async defaults({ action, concurrency, video, image, scope, keys }: Args<"defaults">) {
+    if (action === "get") return { file: DEFAULTS_FILE(), defaults: loadDefaults() };
+    if (action === "clear") return { file: DEFAULTS_FILE(), defaults: clearDefaults(scope ?? "all", keys) };
+    return { file: DEFAULTS_FILE(), defaults: updateDefaults({ concurrency, video, image }) };
   }
 
   async generate({ project, scenes, concurrency }: Args<"generate">) {
@@ -548,13 +584,40 @@ export class LocalCore implements Core {
     const unknown = scenes.find((s) => s.technique && !techniqueById(s.technique));
     if (unknown) throw new Error(`Unknown technique "${unknown.technique}". Call flow_techniques for valid ids.`);
 
+    // Merge saved global defaults with per-scene explicit settings and refuse any call that still has unset required
+    // fields so the assistant asks the user ONLY for settings that are not saved globally.
+    const savedDefaults = loadDefaults();
+    const resolvedList = scenes.map((sc, idx) => {
+      const res = resolveSceneSettings(sc, concurrency, savedDefaults);
+      return { idx, sc, res };
+    });
+    const missingErrors = resolvedList
+      .filter((x): x is { idx: number; sc: (typeof scenes)[number]; res: { ok: false; missing: string[]; usedDefaults: string[] } } => !x.res.ok)
+      .map((x) => `Scene ${x.idx + 1} (${x.sc.type}): missing ${x.res.missing.join(", ")}`);
+    if (missingErrors.length) {
+      const applied = [...new Set(resolvedList.flatMap((x) => x.res.usedDefaults))];
+      throw new Error(
+        `Missing required settings (not specified and not saved in global defaults):\n- ${missingErrors.join("\n- ")}\n` +
+          (applied.length ? `Applied global defaults: ${applied.join(", ")}.\n` : "No global defaults saved yet.\n") +
+          `Ask the user for ONLY the missing settings above before calling flow_generate again (or let them save permanent rules with flow_defaults). Nothing was generated.`,
+      );
+    }
+    const invalidChainQty = resolvedList.find((x) => x.sc.chain_previous && x.res.ok && x.res.settings.quantity > 4);
+    if (invalidChainQty && invalidChainQty.res.ok) {
+      throw new Error(`Scene ${invalidChainQty.idx + 1}: chain_previous supports quantity up to 4 (got ${invalidChainQty.res.settings.quantity}).`);
+    }
+
     const output_dir = projectDir(project);
     // Continue numbering after whatever is already on disk or queued, so reruns never overwrite earlier scenes.
     const onDisk = existsSync(output_dir) ? readdirSync(output_dir).map((f) => Number(f.match(/^scene-(\d+)/)?.[1] ?? 0)) : [];
     const queued = this.queue.list().filter((j) => j.params.output_dir === output_dir).map((j) => Number(j.params.file_stem.match(/\d+/)?.[0] ?? 0));
     const offset = Math.max(0, ...onDisk, ...queued);
     const jobs: Job[] = [];
-    for (const [i, { chain_previous, reference_previous, technique, outfit, on_screen_text, ...scene }] of scenes.entries()) {
+    const lastJobForScene: Job[] = [];
+    for (const { idx: i, sc, res } of resolvedList) {
+      if (!res.ok) continue;
+      const cfg = res.settings;
+      const { chain_previous, reference_previous, technique, outfit, on_screen_text, quantity: _q, variants: _v, ...scene } = sc;
       const phrase = technique ? techniqueById(technique)!.phrase : "";
       // A referenced character must come out identical, not merely similar, so the scene says so explicitly. The
       // wording stays medium-neutral: the same lock has to serve a flat cartoon character and a photoreal avatar.
@@ -580,19 +643,35 @@ export class LocalCore implements Core {
       const inherit = reference_previous
         ? " Match the previous image exactly for the subject's appearance, colour palette, lighting and rendering style; this is the same scene a moment later."
         : "";
-      jobs.push(
-        this.queue.add({
+      const fullPrompt = `${textFirst}${scene.prompt.trim().replace(/\.?$/, ".")}${phrase ? ` ${phrase}` : ""}${lock}${inherit}${textLast}`;
+      const stem = `scene-${String(offset + i + 1).padStart(2, "0")}`;
+      const chunks = splitQuantity(cfg.quantity);
+      let prevChunkJob: Job | undefined;
+      for (const chunk of chunks) {
+        const added = this.queue.add({
           ...scene,
-          prompt: `${textFirst}${scene.prompt.trim().replace(/\.?$/, ".")}${phrase ? ` ${phrase}` : ""}${lock}${inherit}${textLast}`,
-          chain_from: chain_previous ? jobs[i - 1].id : undefined,
-          reference_from: reference_previous ? jobs[i - 1].id : undefined,
-          concurrency,
+          model: cfg.model,
+          aspect_ratio: cfg.aspect_ratio,
+          duration: cfg.duration,
+          resolution: cfg.resolution,
+          download_quality: cfg.download_quality,
+          max_credits: cfg.max_credits,
+          variants: chunk.variants,
+          variant_offset: chunk.offset,
+          total_quantity: cfg.quantity,
+          prompt: fullPrompt,
+          chain_from: chain_previous ? lastJobForScene[i - 1].id : undefined,
+          reference_from: reference_previous ? lastJobForScene[i - 1].id : undefined,
+          concurrency: cfg.concurrency,
           output_dir,
-          file_stem: `scene-${String(offset + i + 1).padStart(2, "0")}`,
-        }),
-      );
+          file_stem: stem,
+        });
+        jobs.push(added);
+        prevChunkJob = added;
+      }
+      lastJobForScene.push(prevChunkJob!);
     }
-    return { output_dir, jobs: jobs.map(jobView) };
+    return { output_dir, applied_defaults: savedDefaults, jobs: jobs.map(jobView) };
   }
 
   async wait({ job_ids, timeout_seconds }: Args<"wait">) {
@@ -712,6 +791,17 @@ export class LocalCore implements Core {
   }
 
   async agent({ project, scenes, aspect_ratio, download_quality, references, scene_references }: Args<"agent">) {
+    const imgDefaults = loadDefaults().image ?? {};
+    const finalAspect = aspect_ratio ?? imgDefaults.aspect_ratio;
+    const finalQuality = download_quality ?? imgDefaults.download_quality;
+    const missing: string[] = [];
+    if (!finalAspect) missing.push("aspect_ratio ('16:9', '9:16', '1:1', '4:3', '3:4')");
+    if (!finalQuality) missing.push("download_quality ('original' 1K or 'upscaled' 2K)");
+    if (missing.length) {
+      throw new Error(
+        `Missing required image batch settings (not specified and not saved in global image defaults): ${missing.join(", ")}. Ask the user for these settings first (or save them with flow_defaults).`,
+      );
+    }
     const output_dir = projectDir(project);
     if (scene_references && scene_references.length !== scenes.length) {
       throw new Error(`scene_references has ${scene_references.length} entries for ${scenes.length} scenes; give one list per scene (empty for none).`);
@@ -728,8 +818,8 @@ export class LocalCore implements Core {
       prompt: `Agent batch: ${scenes.length} images`,
       type: "image",
       max_credits: 0,
-      aspect_ratio,
-      download_quality,
+      aspect_ratio: finalAspect,
+      download_quality: finalQuality,
       agent_scenes: scenes,
       output_dir,
       file_stem: this.nextStem(output_dir, "scene"),

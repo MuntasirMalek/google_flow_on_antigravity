@@ -1,281 +1,142 @@
-# flow-mcp
+# Google Flow on Antigravity (`google_flow_on_antigravity`)
 
-Drive **Google Flow** (flow.google.com) from Claude, Codex or any other MCP app, or from a local control
-panel, using Flow's own credits (free with any Google account: 50 a day), not the pay-per-use video API.
+Drive **Google Flow** (`flow.google.com`) directly from **Google Antigravity** (via `/flow` or plain chat), Claude, Codex, or the built-in local **Flow Studio** control panel — using your own Google AI Flow credits instead of the pay-per-use video API. No browser extension required.
 
-It is a small program that runs on your own machine. It opens its own Chrome window, signs in
-as you, and clicks Flow's real buttons. There is no browser extension, no hosted service and no
-account to create.
+> Based on [GTAI-1/flow-mcp](https://github.com/GTAI-1/flow-mcp) (ISC License), enhanced specifically for **Antigravity**, **parallel multi-clip generation**, **unlimited quantity batching**, **global user rules**, and **zero-popup Brave/Chrome automation**.
 
+```text
+Antigravity (/flow) ──stdio──> flow-mcp ──CDP (port 9333)──> Dedicated Brave/Chrome Profile ──> Google Flow
 ```
-Claude / Codex ──stdio──> flow-mcp ──Chrome DevTools Protocol──> Chrome (its own profile) ──> Flow
-```
-
-**MCP** = Model Context Protocol, the standard that lets Claude use outside tools.
-New here? [GETTING-STARTED.md](GETTING-STARTED.md) takes you from nothing to your first video, step by step, and
-[OVERVIEW.md](OVERVIEW.md) explains what it does in plain English, with no code names.
 
 ---
 
-## What you need
+## Key Features & Enhancements
 
-| | |
+- **`/flow` Antigravity Skill included ([skills/flow/SKILL.md](skills/flow/SKILL.md)):** Type `/flow ...` (or just mention `flow`) in Antigravity chat to generate videos/images, set global rules, or check credits.
+- **Parallel Normal-Composer Generation (`concurrency: 1–4`, Flow Agent OFF):** Overlaps up to 4 independent video or image submissions in Flow simultaneously with human-paced staggers (`FLOW_MCP_SUBMIT_STAGGER_S`), matching finished out-of-order tiles back to exact scenes via `Reuse prompt`, while keeping `chain_previous` / `reference_previous` strictly serial.
+- **Unlimited `quantity` (`1–100` takes per prompt):** Flow's UI caps a single submission at `x4`. Asking for `quantity: 10` (images or videos) automatically splits into parallel `x4 + x4 + x2` batches and numbers outputs cleanly as `scene-01-v1` … `scene-01-v10`.
+- **Global Rules (`flow_defaults`) + Ask-Only-What's-Missing Enforcement:** Save any subset of favorite rules once in `~/.flow-mcp/defaults.json` (e.g., *"always use Omni 1.1 Flash, gen 360p, download 720p, 3 parallel"*). `flow_generate` merges your global rules with explicit per-call overrides and **refuses to guess** any unset required setting — so the assistant asks **only** for settings you haven't locked globally.
+- **Strict Model Verification & Paid-Upscale Guard:** Verifies Flow's model dropdown actually switched to your requested model before spending credits; supports explicit `download_quality` (`original`, `720p`, `1080p`, `upscaled`) and checks paid upscales (e.g. `720p Upscaled · 1 credit`) against `max_credits`.
+- **Auto-Dismiss Flow Onboarding & Default Agent Side Panel:** Automatically steps through Flow's `<flow-change-log-modal>` (`iframe[title="Changelog"]`) and closes the default Agent side panel (`right_panel_close`) on fresh profiles.
+- **Zero-Popup Dedicated Brave & Chrome Support:** Automatically falls back to Brave if Chrome isn't installed, or set `FLOW_MCP_CHROME` to Brave. Uses an isolated persistent profile (`~/.flow-mcp/chrome-profile`) — sign in **once**, and it stays signed in across window closes and reboots with zero remote-debugging popups.
+- **Shared `~/Downloads` Protection & UK English (`en-GB`) Support:** Filters `~/Downloads` fallback strictly to Flow downloads (`isFlowDownloadName`) so unrelated personal files are never moved, and supports both `Move to trash` and `Move to bin`.
+
+---
+
+## What You Need
+
+| Requirement | Notes |
 |---|---|
-| **macOS or Windows 10/11** | Developed and tested on macOS. Windows is supported (Chrome, the Recycle Bin and the panel launcher all have Windows versions), but it hasn't been run on a real PC yet, so please report anything that breaks |
-| **Node.js 22 or newer** | `node --version` |
-| **Google Chrome** | Any recent version |
-| **A Google account** | Free. Flow gives every account 50 credits a day; a paid Google AI plan adds more and unlocks 1080p downloads. Developed on a Pro plan |
-| **FFmpeg** *(optional)* | Mac: `brew install ffmpeg` · Windows: `winget install Gyan.FFmpeg`. Needed only to join clips, mix music or record narration |
-| **A Google AI Studio key** *(optional, free)* | Only for the Google narration voices. See below |
-| **whisper.cpp** *(optional, free)* | Only for captions: it hears the words, on your computer. Mac: `brew install whisper-cpp` · Windows: `whisper-cli.exe` from [the whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases), on your PATH. The speech model it needs downloads by itself the first time you caption a video: 148 MB for English, 574 MB for any other language |
-
-A display must stay awake: the Chrome window is really being driven, so the machine cannot be
-headless or asleep mid-run.
+| **macOS, Windows 10/11, or Linux** | Tested on macOS; cross-platform Chrome/Brave & Trash support included |
+| **Node.js 22+** | Check with `node --version` |
+| **Google Chrome or Brave Browser** | Any recent version |
+| **A Google Account** | Free (50 Flow credits/day; stills are 0 credits) or Google AI Pro/Ultra |
+| **FFmpeg** *(optional)* | Needed for `flow_assemble` and `flow_narrate` (`brew install ffmpeg` / `port install ffmpeg` / `winget install Gyan.FFmpeg`) |
+| **whisper.cpp** *(optional)* | Only for `flow_captions` / `flow_transcribe` |
 
 ---
 
-## Install
+## Install & Connect to Antigravity
+
+### 1. Clone and build
+> **macOS note:** Put the folder directly in your home directory (`~/google_flow_on_antigravity` or `~/flow-mcp`), **not** inside `~/Desktop`, `~/Documents`, or `~/Downloads`, to avoid macOS `EPERM` permission errors.
 
 ```bash
-git clone https://github.com/GTAI-1/flow-mcp.git
-cd flow-mcp
+cd ~
+git clone https://github.com/MuntasirMalek/google_flow_on_antigravity.git
+cd google_flow_on_antigravity
 npm install
 npm run build
 ```
 
-> **Mac: do not put this folder in `~/Desktop`, `~/Documents` or `~/Downloads`.** macOS protects those
-> folders, and apps that launch the server from there can be refused permission to read its own
-> files (`EPERM: operation not permitted`). `~/flow-mcp` or anywhere in your home folder is fine.
->
-> **Windows: keep it out of folders OneDrive syncs** (often Desktop and Documents), where files can be held
-> online-only. `C:\Users\<you>\flow-mcp` is fine.
-
-Then sign in, once:
-
+### 2. Sign in once (persistent, zero popups)
 ```bash
 npm run login
+# Or to use Brave explicitly on macOS:
+FLOW_MCP_CHROME="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" npm run login
 ```
+Sign into your Google account in the dedicated window that opens and open (or create) a Flow project. Your session is saved permanently in `~/.flow-mcp/chrome-profile` — even if you close the window or reboot, you stay signed in.
 
-That opens the dedicated Chrome window. Sign into Google by hand, open (or create) a Flow project,
-and leave the window open. The program never types your password; it only uses the session you
-created. That Chrome profile lives in `~/.flow-mcp/chrome-profile` and is separate from your
-everyday browser.
-
----
-
-## Connect it to Claude, Codex or Antigravity
-
-**Claude Code**
-
-```bash
-claude mcp add --scope user flow -- node /absolute/path/to/flow-mcp/dist/index.js
-```
-
-`--scope user` makes it available in every folder; the default (`local`) only works in the folder you ran it from.
-
-**Claude Desktop**: add to `claude_desktop_config.json` (Mac: `~/Library/Application Support/Claude/`, Windows:
-`%APPDATA%\Claude\`). On Windows, write the path with doubled backslashes, like
-`"C:\\Users\\you\\flow-mcp\\dist\\index.js"`:
+### 3. Add the MCP server to Antigravity
+Edit `~/.gemini/config/mcp_config.json` and add the `flow` entry (use the full path from `which node` on macOS if Node is installed via Homebrew or MacPorts):
 
 ```json
-{ "mcpServers": { "flow": { "command": "node", "args": ["/absolute/path/to/flow-mcp/dist/index.js"] } } }
+{
+  "mcpServers": {
+    "flow": {
+      "command": "/opt/local/bin/node",
+      "args": ["/Users/YOUR_USERNAME/google_flow_on_antigravity/dist/index.js"],
+      "env": {
+        "PATH": "/opt/local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "FLOW_MCP_CHROME": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+      }
+    }
+  }
+}
 ```
+*(Omit `FLOW_MCP_CHROME` if you want Google Chrome.)*
 
-**Codex**: add to `~/.codex/config.toml` (on Windows, `%USERPROFILE%\.codex\config.toml`):
-
-```toml
-[mcp_servers.flow]
-command = "node"
-args = ["/absolute/path/to/flow-mcp/dist/index.js"]
+### 4. Install the `/flow` slash command in Antigravity
+```bash
+mkdir -p ~/.gemini/config/skills/flow
+cp skills/flow/SKILL.md ~/.gemini/config/skills/flow/SKILL.md
 ```
-
-Or run `codex mcp add flow -- node /absolute/path/to/flow-mcp/dist/index.js`. No timeout setting is needed:
-Codex, like most MCP apps, gives up on a tool call after 60 seconds, so any call that runs longer than about
-45 seconds (creating a character, a 1080p download) answers with a task id instead and keeps working, and
-`flow_wait` collects the result.
-
-**Antigravity** (Google's coding app): add a `flow` entry to `mcp_config.json`. On a Mac it lives in
-`~/.gemini/antigravity/`; you can also open it from the agent panel's **…** menu → **Manage MCP Servers** →
-**View raw config**. Keep any servers already listed and add this one beside them:
-
-```json
-{ "mcpServers": { "flow": { "command": "node", "args": ["/absolute/path/to/flow-mcp/dist/index.js"] } } }
-```
-
-**Other MCP apps** (Cursor, VS Code and others) take the same command and arguments in their own MCP
-settings. ChatGPT in the browser or the ChatGPT app can't use it: its connectors only reach servers on
-the internet, and this tool has to run on your own computer to drive your Chrome window.
-
-Developed and tested with Claude. Codex and Antigravity speak the same protocol, so they should work the
-same way, but neither has been tried yet, so please report how it goes. Running two of them at once is safe:
-the first one started drives Flow, and the others pass their requests to it.
-
-Restart the app, then ask it: *"check my Flow session"*. You should get your plan and credit balance
-back. Everything after that is plain English; you never type tool names.
+Refresh MCP servers in Antigravity (**Skills & Customizations → MCP Servers**) or restart Antigravity.
 
 ---
 
-## Your first film
+## Using `/flow` in Antigravity Chat
 
-Nothing below costs a credit until step 4, and the assistant asks before spending.
-
-1. **Check the session.** *"Check my Flow session."* This confirms sign-in, plan and credits.
-2. **Make a character.** *"Create a character called Pip, a small lamplighter in a flat cartoon style."*
-   Flow draws the portrait. Free.
-3. **Draw the key frames.** *"Draw three stills with Pip: a dark rooftop, him lighting a lamp, the
-   whole hillside glowing. Match each one to the last."* Free: stills cost nothing, so get the look
-   right here before spending.
-4. **Shoot it.** *"Turn those into three 10-second shots, each starting where the last one ended,
-   720p, no more than 15 credits each."* This spends credits. The price is read from Flow's own
-   quote first and the scene is skipped if it is over your cap.
-5. **Narrate it.** *"Record this line with a warm documentary voice."* Free, any length.
-6. **Cut it.** *"Join the three shots under the narration, don't freeze the last frame."*
-   The finished file lands in `~/flow-mcp-out/<project>/`.
+- **Set global rules once (optional):**
+  > `/flow always use Omni 1.1 Flash, gen 360p, download 720p, 16:9, and 3 parallel for videos`
+- **Generate videos or images (asks ONLY what isn't saved globally):**
+  > `/flow make 10 cyberpunk cat images`
+  > `/flow create 3 documentary clips about deepfakes`
+- **Override for a single run without changing global rules:**
+  > `/flow make 2 videos in 720p with Omni 1.2 Flash, 8s`
+- **Clear a global rule anytime:**
+  > `/flow clear my global video resolution default`
 
 ---
 
-## The control panel
+## Local Control Panel (Flow Studio)
 
-The same features, without an AI assistant in the loop:
+You can also drive everything visually in your browser at **http://127.0.0.1:8787** while Antigravity is running, or launch it standalone:
 
 ```bash
-npm run studio     # then open http://127.0.0.1:8787
+npm run studio
 ```
 
-or double-click **Flow Studio.command** (Mac) or **Flow Studio.cmd** (Windows).
-
-Eight tabs, in the order you would use them:
-
-- **Cast**: reusable characters. Create them, edit them in place, or build one from a picture.
-- **Frames**: free stills, with *match previous frame* to keep a set on-model.
-- **Shots**: paid clips, with first/last frames, chaining, a live credit estimate, and a card that
-  continues a finished clip from its own last frame.
-- **Voice**: free narration with Kokoro (the default: 28 voices, runs on your computer, no key) or Google's
-  voices. Your saved narrations are listed
-  here to play or delete, and there's a field for your Google AI Studio key (checked with Google, stored
-  only on your computer; never paste it into a chat).
-- **Restyle**: change a clip you already have.
-- **Cut**: join any videos into one film, in the order you pick. Upload one, or choose from films you've
-  already made. Add a narration (from your saved ones or an upload) and music, and turn the clips' own
-  sound down so the narration sits on top.
-- **Captions**: put the spoken words on screen, the way short-form videos do, on wide or vertical videos.
-  Pick a video and the language spoken in it (about 100 languages, or Detect automatically), choose a
-  style (Bold pop, Highlight, Word by word, Clean, Boxed), where it sits (bottom,
-  middle, top, an exact height, or tap the preview), its size (a slider), its letters (normal, CAPS or lowercase) and
-  highlight colour, and see it on a real frame of your video before anything is made. Fix any misheard
-  word in the text box and it keeps its timing; press Enter to start a new caption. Saves `<name>-captions.mp4` plus an `.srt` for YouTube.
-  Everything happens on your computer; nothing is uploaded.
-- **Library**: everything in your Flow project. Download it again for free (a scene comes down as one
-  finished film, not loose clips), or move it to Flow's Trash.
-
-A progress monitor and a gallery of your saved work sit alongside. The gallery shows stills or clips
-on the tabs that use them. On a wide screen, each side scrolls on its own. Two kinds of delete, clearly
-labelled: **Move to the Mac's Trash / Recycle Bin** removes a file from your computer; **Move to
-Flow's Trash** removes it from your Flow project only. Both can be undone.
-
-The panel ships with the repo but is not started for you: run `npm run studio` when you want it.
-Opening `studio/index.html` as a plain file does nothing; the page needs the server behind it, and
-says so in red if you try.
-
-Claude's own process serves the same panel while it runs. Whichever process starts first owns the
-Chrome tab and the job queue; the other talks to it over a local API, so Claude and the panel always
-agree on what is running. That API listens on 127.0.0.1 only and needs a per-run token
-(`~/.flow-mcp/token`).
+Both **Shots** and **Frames** tabs include **Quantity** (with `>4` automatic parallel splitting) and **Parallel (1–4)** controls.
 
 ---
 
-## Tools
+## Tools Reference
 
 | Tool | Purpose |
 |---|---|
-| `flow_status` | Session state (signed in, project open, plan, credits left), queue, pacing, prompt playbook |
-| `flow_generate` | Queue scenes in Flow's normal composer (Agent off): prompt, image or video, model, aspect, duration, resolution, variants, first/last frame, reference images, `download_quality` (`original` / `720p` / `1080p` / `upscaled`), `max_credits` cap, and optional `concurrency` (1–4) for parallel non-chained renders |
-| `flow_wait` | Wait for jobs, or for the task id of a slow call; returns file paths and results. Answers within about 40 s, so call again until `finished` is true |
-| `flow_cancel` | Cancel a job that has not started |
-| `flow_retry` | Re-queue failed jobs with the same settings and file names (a failed tile is first retried inside Flow with its own free Retry button: `retries`, default 1) |
-| `flow_assets` | List images and videos already in the Flow project (usable as `asset:<title>`) |
-| `flow_download` | Download existing project media without regenerating. Free, including the 1080p / 2K upscale. A scene comes down as one stitched film. `collection` brings a whole Flow collection down as one ZIP of originals |
-| `flow_trash` | Move an image, video or scene in the Flow project to Flow's Trash, where it can be restored. Exact title only; refuses if two items share it; never deletes permanently |
-| `flow_agent_images` | Fast image batch: hands up to 50 scenes to Flow's own Agent mode, rendered in parallel (20 images in ~204 s), 0 credits. The finished images are gathered into a Flow collection and come down as ONE ZIP of originals, checked against the batch and downloaded again if one is missing; if that step fails, the batch stops and says where the images are, and never downloads them one by one. If Agent mode cannot be used at all, the batch stops with the reason. Each image is matched back to its scene by its stored prompt, so file numbers are right in any finish order. Scenes the agent drops are re-asked of it (up to 2 rounds), then re-run one by one. `references` attaches characters, places and objects once in the agent's composer (like its + button), and `scene_references` says which scenes use which, so a whole story stays on-model; scenes made one by one keep their references |
-| `flow_edit` | Video-to-video edit of a clip already in the project (relight, weather, remove objects). Flow shows no quote first; about 20 credits for a 4 s clip |
-| `flow_continue` | Start a clip from the last frame of an existing one **with a character or your avatar still attached**. The composer allows a start frame or attached characters, never both, so this drives Flow's agent mode, which does both. No quote beforehand |
-| `flow_character` | Create a reusable character from a description (Flow draws the portrait) or an image, with a personality and a stock voice; use it as `asset:<name>` |
-| `flow_character_edit` | Restyle an existing character in place (free) and save the new portrait; name, personality and voice are kept, so every scene referencing it updates. Pass `look` with the updated description; with only a name it re-saves the current portrait |
-| `flow_characters` | List the project's characters |
-| `flow_techniques` | 39 film-technique prompt presets (camera moves, product shots, transitions, image commands); pass an id as a scene's `technique` |
-| `flow_narrate` | Free narration audio, any length: `kokoro` (the default, a voice that runs on your computer, 28 voices and a `speed`), or `gemini` (Google AI Studio text-to-speech, with the same voices Flow has, plus a `style` note; falls back to Kokoro when the daily limit is used up) |
-| `flow_voices` | Narrator voices available, whether Kokoro's model is downloaded yet, and whether a Google key is set up |
-| `flow_captions` | Burn spoken-word captions into any video, landscape or vertical, in one of five styles, at any height and size, in normal, capital or lowercase letters, in about 100 languages; returns the transcript so a misheard word can be fixed and the call repeated (local whisper.cpp, Chrome and FFmpeg, no credits) |
-| `flow_transcribe` | Hear the words in any video or audio on your computer, with each word's start and end time (local whisper.cpp, free) |
-| `flow_assemble` | Join clips into one MP4 (a project's clips, or any you list, in order) with optional music and voiceover, and separate volume for the clips' own sound. A voiceover can also be built line by line (`voice_lines`), each line cut from a take and placed at its own moment, for narration timed to on-screen titles (local FFmpeg, no credits) |
+| `flow_status` | Session state (signed in, project open, plan, credits), saved global `defaults`, queue, pacing, and playbook |
+| `flow_defaults` | `get`, `set`, or `clear` persistent global rules (`~/.flow-mcp/defaults.json`) for video, image, and concurrency |
+| `flow_generate` | Queue videos/images in normal composer (Agent off) with `quantity` (`1–100`, auto-splitting `>4` into parallel `x4` batches), `concurrency` (`1–4`), `download_quality` (`original`/`720p`/`1080p`/`upscaled`), and hard validation for unset settings |
+| `flow_wait` | Wait for queued jobs or slow `task_id`s and return file paths & status |
+| `flow_cancel` / `flow_retry` | Cancel queued jobs or retry failed jobs / failed scenes |
+| `flow_assets` / `flow_download` / `flow_trash` | List, download (free, incl. collections/upscales), or move project assets to Trash/Bin |
+| `flow_agent_images` | Fast image batch (up to 50 scenes) via Flow Agent mode, downloaded as one ZIP |
+| `flow_edit` / `flow_continue` | Video-to-video restyle or frame-exact / likeness-locked continuation |
+| `flow_character` / `flow_character_edit` / `flow_characters` | Reusable characters locked across scenes |
+| `flow_techniques` | 39 film-technique prompt presets |
+| `flow_narrate` / `flow_voices` | Local Kokoro (28 English voices) or free Google AI Studio Gemini TTS (multilingual) |
+| `flow_assemble` / `flow_presenter` | Local FFmpeg stitching, music ducking, timed `voice_lines`, picture-in-picture presenter |
+| `flow_transcribe` / `flow_captions` | Local `whisper.cpp` transcription & burned-in captions (~100 languages) |
 
-**Continuity between shots:** `chain_previous` (this clip starts on the last frame of the previous
-one), `first_frame` + `last_frame` (animate between two stills you chose), `reference_images` (keep a
-character or product consistent). Flow's *composer* takes either frames or references, never both, so
-when you need a start frame **and** a character locked together, use `flow_continue`, which goes through
-Flow's agent mode and does both.
+## Environment Variables
 
-Output lands in `~/flow-mcp-out/<project>/scene-NN.ext`.
-
-### Narration voices
-
-`flow_narrate` uses **Kokoro** by default: a free voice that runs on your own computer, with no key, no daily
-limit and no length cap. Pick any of its 28 English voices (American and British) and a speed. The first take
-downloads its model once (326 MB, about a minute); after that a take records in a couple of seconds.
-
-#### Google's voices (optional)
-
-For Google's voices (the same ones Flow offers), get a free key from
-[Google AI Studio](https://aistudio.google.com/apikey) and paste it into **Flow Studio → Voice → Google AI Studio
-key → Save key**. It's checked with Google before it's saved, and stored only on your computer. Or set
-`GEMINI_API_KEY`. Either way, never paste the key into a chat; it would end up in the conversation history.
+`FLOW_MCP_CHROME`, `FLOW_MCP_CDP_PORT` (`9333`), `FLOW_MCP_PORT` (`8787`), `FLOW_MCP_OUTPUT` (`~/flow-mcp-out`), `FLOW_MCP_HOME` (`~/.flow-mcp`), `FLOW_MCP_CONCURRENCY` (`1`–`4`), `FLOW_MCP_SUBMIT_STAGGER_S` (`4`), `FLOW_MCP_PAUSE_MIN_S` (`25`), `FLOW_MCP_PAUSE_MAX_S` (`70`), `GEMINI_API_KEY`.
 
 ---
 
-## Behaviour and settings
+## Credits & Risk Notice
 
-- By default, one generation runs at a time with a random 25–70 second pause between them. The page carries an
-  invisible reCAPTCHA; this drives the real interface at human pace and does nothing to evade it.
-- **Parallel non-chained scenes (optional):** Flow's normal composer (with Flow Agent off) lets you queue multiple
-  videos or images at once. Pass `concurrency: 2`–`4` to `flow_generate` (or set `FLOW_MCP_CONCURRENCY` / pick
-  **Parallel** in Flow Studio) to keep up to 4 independent scenes in flight with a short stagger between
-  submissions (`FLOW_MCP_SUBMIT_STAGGER_S`, default 4 s). Each scene still checks Flow's upfront `max_credits`
-  quote, finished tiles are matched back to their scenes via `Reuse prompt`, and `chain_previous` /
-  `reference_previous` scenes stay strictly serial.
-- **Brave and other Chromium browsers:** `flow-mcp` automatically falls back to Brave if Chrome is not installed,
-  or point `FLOW_MCP_CHROME` at Brave (e.g. `/Applications/Brave Browser.app/Contents/MacOS/Brave Browser` on Mac).
-  It uses a dedicated profile (`~/.flow-mcp/chrome-profile`), so you sign in once and it stays unattended with no
-  remote-debugging popups.
-- Before each generation the server reads Flow's own credit quote and skips the scene if it exceeds
-  `max_credits` (default 25).
-- Any Google account language works (including UK English `en-GB`). The server finds Flow's buttons by their
-  English names, so its Chrome window always shows Flow in English (it adds `?hl=en` to the address). Your
-  account's own language setting is never changed, and prompts can be written in any language.
-- Environment variables: `GEMINI_API_KEY`, `FLOW_MCP_PORT` (8787), `FLOW_MCP_OUTPUT`,
-  `FLOW_MCP_HOME`, `FLOW_MCP_CDP_PORT` (9333), `FLOW_MCP_CHROME`,
-  `FLOW_MCP_CONCURRENCY` (1), `FLOW_MCP_SUBMIT_STAGGER_S` (4), `FLOW_MCP_PAUSE_MIN_S` (25),
-  `FLOW_MCP_PAUSE_MAX_S` (70).
-
-## If something goes wrong
-
-| Symptom | Cause |
-|---|---|
-| Mac: the server will not start, `EPERM: operation not permitted` | The folder is in a macOS-protected location. Move it out of `~/Desktop`, `~/Documents` or `~/Downloads` and update the path in your Claude config |
-| *"Not signed in"* or *"no project open"* | Run `npm run login`, sign in, open a Flow project, leave the window open |
-| A clip generated but no file arrived | The media is still in Flow. `flow_download` pulls it back for nothing. Never re-generate and pay twice |
-| Everything times out | The Chrome window was closed, or the machine slept. Reopen it with `npm run login` |
-
----
-
-## Updating
-
-Tell your assistant: *"Update Flow MCP: in my flow-mcp folder, run git pull, then npm install, then npm run
-build."* Then fully quit and reopen your assistant app so it loads the new version.
-
----
-
-## Licence and risk
-
-This automates Flow's web interface. It can break whenever Google changes that interface, and
-automated use may be against Google's terms of service. Use it on your own account, at your own
-risk.
+- Originally created by [GTAI-1/flow-mcp](https://github.com/GTAI-1/flow-mcp) (ISC License).
+- Enhanced for Antigravity by [MuntasirMalek](https://github.com/MuntasirMalek).
+- This project automates Google Flow's web interface at human pace. Google UI updates can break selectors, and automated browser use may conflict with Google's terms of service — use on your own account at your own risk.

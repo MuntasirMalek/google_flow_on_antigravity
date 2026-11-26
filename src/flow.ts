@@ -593,7 +593,7 @@ async function typePrompt(page: Page, prompt: string): Promise<void> {
 
 export type DownloadQuality = "original" | "720p" | "1080p" | "upscaled";
 
-export async function downloadMedia(page: Page, mediaId: string, targetStem: string, quality: DownloadQuality = "original", job?: Job): Promise<string[]> {
+export async function downloadMedia(page: Page, mediaId: string, targetStem: string, quality: DownloadQuality = "original", job?: Job, variantStart?: number): Promise<string[]> {
   // A tile that has just finished rendering is still settling and the grid re-renders around it, so give it a moment.
   await scrollToTop(page);
   await pause(page, 2500);
@@ -607,7 +607,7 @@ export async function downloadMedia(page: Page, mediaId: string, targetStem: str
   // Grab the title NOW, while the id still resolves, so the download can re-find this exact tile later even if the
   // virtualised grid unmounts and remounts it between steps.
   const title = (await tile.getAttribute("aria-label").catch(() => null)) ?? undefined;
-  return downloadTile(page, tileByIdOrTitle(page, mediaId, title), targetStem, quality, title, job);
+  return downloadTile(page, tileByIdOrTitle(page, mediaId, title), targetStem, quality, title, job, variantStart);
 }
 
 type TileResolver = () => Promise<Locator>;
@@ -744,14 +744,18 @@ function extensionOf(file: string): string {
   return ".bin";
 }
 
-// Unpacks a multi-take ZIP into <stem>.mp4, <stem>-v2.mp4, ... - the same names a multi-variant generation gets - so
-// every take is usable instead of one unplayable archive. The ZIP is kept beside them, renamed, in case it is wanted.
-function unpackTakes(zip: string, targetStem: string): string[] {
+// Unpacks a multi-take ZIP into <stem>.mp4, <stem>-v2.mp4, ... (or <base>-v<start+i> when splitting large quantities
+// across multiple x4 batches) so every take has a unique sequential filename. The ZIP is kept beside them.
+function unpackTakes(zip: string, targetStem: string, variantStart?: number): string[] {
   const work = mkdtempSync(join(tmpdir(), "flow-takes-"));
   const takes = extractZip(zip, work).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const baseStem = variantStart !== undefined ? targetStem.replace(/-v\d+$/, "") : targetStem;
   const out: string[] = [];
   for (const [i, path] of takes.entries()) {
-    const dest = `${targetStem}${i ? `-v${i + 1}` : ""}${extensionOf(path)}`;
+    const dest =
+      variantStart !== undefined
+        ? `${baseStem}-v${variantStart + i}${extensionOf(path)}`
+        : `${targetStem}${i ? `-v${i + 1}` : ""}${extensionOf(path)}`;
     renameSync(path, dest);
     out.push(dest);
   }
@@ -1093,7 +1097,7 @@ async function renameTile(page: Page, tile: Locator, title: string): Promise<boo
   }
 }
 
-async function downloadTile(page: Page, target: Locator | TileResolver, targetStem: string, quality: DownloadQuality, expectedHint?: string, job?: Job): Promise<string[]> {
+async function downloadTile(page: Page, target: Locator | TileResolver, targetStem: string, quality: DownloadQuality, expectedHint?: string, job?: Job, variantStart?: number): Promise<string[]> {
   await useOwnDownloadDir(page);
   const resolve: TileResolver = typeof target === "function" ? target : async () => target;
   let lastError: unknown;
@@ -1151,7 +1155,7 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
       const file = await waitForDownloadedFile(page, before, usingUpscale ? 600_000 : 180_000, titleHint);
       const kind = extensionOf(file);
       let saved: string[];
-      if (kind === ".zip") saved = unpackTakes(file, targetStem);
+      if (kind === ".zip") saved = unpackTakes(file, targetStem, variantStart);
       else {
         const target = `${targetStem}${kind}`;
         renameSync(file, target);
@@ -1415,8 +1419,11 @@ export async function runGeneration(job: Job): Promise<string[]> {
 
   mkdirSync(s.output_dir, { recursive: true });
   const files: string[] = [];
+  const offset = s.variant_offset ?? 0;
+  const multi = (s.total_quantity ?? fresh.length) > 1 || offset > 0;
   for (const [i, id] of fresh.entries()) {
-    const label = fresh.length > 1 ? `${s.file_stem}-v${i + 1}` : s.file_stem;
+    const variantNum = offset + i + 1;
+    const label = multi ? `${s.file_stem}-v${variantNum}` : s.file_stem;
     // Flow names clips itself and reuses those names, so two takes of one scene come back identically titled and
     // neither can be found by name afterwards. Renaming each finished tile to the scene's own file stem makes every
     // later lookup - download, continue, assemble - unambiguous. Best effort: a failed rename must not lose the clip.
@@ -1429,7 +1436,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
     // old title failed every such download after 30 s ("locator.waitFor: Timeout 30000ms exceeded ... aria-label=
     // <the prompt>", reported by a user, 2026-10-15) while the clip sat finished and renamed in Flow.
     const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job)));
+    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined)));
     await pause(page, 1500);
   }
   return files;
@@ -1585,7 +1592,10 @@ export async function runParallelGenerations(
       const job = chosen.job;
       const s = job.params;
       mkdirSync(s.output_dir, { recursive: true });
-      const label = chosen.expectedVariants > 1 ? `${s.file_stem}-v${chosen.receivedCount + 1}` : s.file_stem;
+      const offset = s.variant_offset ?? 0;
+      const variantNum = offset + chosen.receivedCount + 1;
+      const multi = (s.total_quantity ?? chosen.expectedVariants) > 1 || offset > 0;
+      const label = multi ? `${s.file_stem}-v${variantNum}` : s.file_stem;
       const newTitle = `${basename(s.output_dir)}-${label}`;
       job.progress = "downloading";
       try {
@@ -1597,9 +1607,9 @@ export async function runParallelGenerations(
         await pause(page, 600);
         const stem = join(s.output_dir, label);
         const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-        const downloaded = await downloadMedia(page, handle, stem, s.download_quality, job);
+        const downloaded = await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined);
         job.files.push(...downloaded);
-        chosen.receivedCount++;
+        chosen.receivedCount += Math.max(1, downloaded.length);
         if (chosen.receivedCount >= chosen.expectedVariants) {
           job.status = "done";
           job.progress = undefined;

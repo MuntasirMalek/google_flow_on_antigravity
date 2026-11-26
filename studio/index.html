@@ -224,7 +224,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
           <label class="f">Project folder</label><input type="text" id="f_project" placeholder="MyFilm">
           <div class="grid2">
             <div><label class="f">Frame</label><div class="seg" data-seg="f_aspect"></div></div>
-            <div><label class="f">Takes per frame</label><div class="seg" data-seg="f_variants"></div></div>
+            <div><label class="f">Quantity per frame · >4 splits in parallel</label><div class="seg" data-seg="f_variants"></div></div>
           </div>
           <div class="grid2">
             <div><label class="f">Engine</label><div class="seg" data-seg="f_engine"></div></div>
@@ -259,7 +259,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
             <div><label class="f">Download size · upscale is free</label><div class="seg" data-seg="s_quality"></div></div>
           </div>
           <div class="grid2">
-            <div><label class="f">Takes per shot</label><div class="seg" data-seg="s_variants"></div></div>
+            <div><label class="f">Quantity per shot · >4 splits in parallel</label><div class="seg" data-seg="s_variants"></div></div>
             <div><label class="f">Parallel · non-chained</label><div class="seg" data-seg="s_concurrency"></div></div>
           </div>
           <label class="f">Max credits per shot</label><input type="number" id="s_max" min="0" value="25">
@@ -498,7 +498,7 @@ addEventListener("hashchange", () => { const t = hashTab(); if (t) showTab(t); }
 const durations = () => (S.shots.model.startsWith("Omni 1.2") ? [4, 6, 8, 10, 12, 15] : [4, 6, 8, 10]);
 const SEGS = {
   f_aspect: { get: () => S.frames.aspect, set: (v) => (S.frames.aspect = v), opts: ["16:9", "9:16", "1:1", "4:3", "3:4"] },
-  f_variants: { get: () => S.frames.variants, set: (v) => (S.frames.variants = +v), opts: [1, 2, 3, 4] },
+  f_variants: { get: () => S.frames.variants, set: (v) => (S.frames.variants = +v), opts: [1, 2, 4, 8, 12] },
   f_engine: { get: () => S.frames.engine, set: (v) => (S.frames.engine = v), opts: ["exact", "agent"], labels: { exact: "One by one", agent: "Flow agent · all at once" } },
   f_concurrency: { get: () => S.frames.concurrency, set: (v) => (S.frames.concurrency = +v), opts: [1, 2, 3, 4] },
   s_aspect: { get: () => S.shots.aspect, set: (v) => (S.shots.aspect = v), opts: ["16:9", "9:16"] },
@@ -513,7 +513,7 @@ const SEGS = {
       return low ? { original: "360p", upscaled: "720p" } : { original: "720p", upscaled: "1080p" };
     },
   },
-  s_variants: { get: () => S.shots.variants, set: (v) => (S.shots.variants = +v), opts: [1, 2, 3, 4] },
+  s_variants: { get: () => S.shots.variants, set: (v) => (S.shots.variants = +v), opts: [1, 2, 4, 8] },
   s_concurrency: { get: () => S.shots.concurrency, set: (v) => (S.shots.concurrency = +v), opts: [1, 2, 3, 4] },
   cap_pos: { get: () => (typeof S.captions.position === "string" ? S.captions.position : ""), set: (v) => { S.captions.position = v; capPreviewSoon(); }, opts: ["bottom", "middle", "top"], labels: { bottom: "Bottom", middle: "Middle", top: "Top" } },
   cap_letters: { get: () => capLetters(S.captions.style), set: (v) => { (S.captions.letters ??= {})[S.captions.style] = v; capPreviewSoon(); }, opts: ["as_said", "capitals", "lowercase"], labels: { as_said: "Normal", capitals: "CAPS", lowercase: "lower" } },
@@ -1088,19 +1088,19 @@ $("#roll").onclick = async () => {
   if (!list.length) return;
   const ref = (v) => (v ? (v.asset ? `asset:${v.asset}` : v.path) : undefined);
   if (!video && cfg.engine === "agent") {
-    try { await api("agent", { project: cfg.project, scenes: list.map((s) => s.prompt.trim()), aspect_ratio: cfg.aspect }); toast("Handed to Flow's agent."); poll(); } catch (err) { toast(err.message, true); }
+    try { await api("agent", { project: cfg.project, scenes: list.map((s) => s.prompt.trim()), aspect_ratio: cfg.aspect, download_quality: "original" }); toast("Handed to Flow's agent."); poll(); } catch (err) { toast(err.message, true); }
     return;
   }
   const scenes = list.map((sc, i) => ({
     prompt: sc.prompt.trim(),
     type: video ? "video" : "image",
     aspect_ratio: cfg.aspect,
-    variants: cfg.variants,
+    quantity: cfg.variants,
     technique: sc.technique || undefined,
     reference_images: sc.refs.length ? sc.refs.map(ref) : undefined,
     ...(video
       ? { model: cfg.model, max_credits: cfg.max, download_quality: cfg.quality, ...(cfg.model.startsWith("Omni") ? { duration: cfg.duration, resolution: cfg.resolution } : {}), chain_previous: (i > 0 && sc.chain) || undefined, first_frame: sc.chain ? undefined : ref(sc.first), last_frame: ref(sc.last) }
-      : { max_credits: 0, reference_previous: (i > 0 && sc.match) || undefined }),
+      : { model: "latest", download_quality: "original", max_credits: 0, reference_previous: (i > 0 && sc.match) || undefined }),
   }));
   const cost = video ? list.reduce((n, s) => n + sceneCost(s), 0) : 0;
   if (cost > 0 && !confirm(`Queue ${scenes.length} shot(s) for about ${cost} credits?`)) return;
