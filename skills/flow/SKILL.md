@@ -26,7 +26,9 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
    - Confirm the saved rules back to the user concisely.
 
 3. **Ask ONLY for settings that are NOT saved globally (and NOT already stated)**
-   - `flow_generate` enforces all required settings in code after merging saved global defaults with per-call values.
+   - `flow_generate` enforces required settings in code after merging saved global defaults with per-call values.
+   - **NEVER ask the user how many batches to run in parallel** — parallel batching (`concurrency` up to 4) is automatic by default whenever `quantity > 4` or multiple independent scenes are requested. Only change `concurrency` if the user explicitly asks or saved a global rule.
+   - **NEVER ask for `quantity` if the user already stated a count** (e.g. *"9 cyberpunk dog images"* → `quantity: 9`).
    - Compare what the user already gave + `defaults` from step 1 against the required fields:
      - **Video scenes (`type: "video"`):**
        - `model` (`Omni 1.2 Flash`, `Omni 1.1 Flash`, `Veo 3.1 - Lite`)
@@ -34,15 +36,13 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
        - `resolution` (`360p` or `720p`, for Omni models)
        - `download_quality` (`original`, `720p`, `1080p`, or `upscaled`)
        - `aspect_ratio` (`16:9` or `9:16`)
-       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches!)
-       - `concurrency` (`1`–`4` parallel Flow submissions)
+       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
      - **Image scenes (`type: "image"`):**
        - `model` (`latest` / `Nano Banana 2.1`, `Nano Banana Pro`, `Nano Banana 2 Lite`)
        - `aspect_ratio` (`16:9`, `9:16`, `1:1`, `4:3`, `3:4`)
        - `download_quality` (`original` 1K or `upscaled` 2K)
-       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches!)
-       - `concurrency` (`1`–`4` parallel submissions) — or `flow_agent_images` for large prompt lists (up to 50 distinct scenes at once).
-   - If any required setting is still unset, ask the user **only** for the missing ones (use multiple-choice `ask_question` when available, and mention they can say *"save as global default"* for anything they want remembered).
+       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
+   - If any required setting above is still unset, ask ONLY those missing items (keep it short; do not add extra filler questions). Mention briefly that they can say *"make X default"* anytime to save any setting globally.
 
 4. **Confirm credit spend before paid runs**
    - Images cost **0 credits**.

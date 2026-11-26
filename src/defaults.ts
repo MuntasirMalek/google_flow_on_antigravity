@@ -159,13 +159,11 @@ export function resolveSceneSettings(
   const explicitQty = scene.quantity ?? scene.variants;
   const quantity = pick("quantity", explicitQty);
 
-  let concurrency = callConcurrency;
-  if (concurrency === undefined && defaults.concurrency !== undefined) {
-    concurrency = defaults.concurrency;
-    usedDefaults.push(`concurrency=${defaults.concurrency}`);
-  } else if (concurrency === undefined && envConcurrency !== undefined) {
-    concurrency = envConcurrency;
-    usedDefaults.push(`concurrency=${envConcurrency} (env)`);
+  const concurrency = callConcurrency ?? defaults.concurrency ?? envConcurrency ?? 4;
+  if (callConcurrency === undefined) {
+    if (defaults.concurrency !== undefined) usedDefaults.push(`concurrency=${defaults.concurrency}`);
+    else if (envConcurrency !== undefined) usedDefaults.push(`concurrency=${envConcurrency} (env)`);
+    else usedDefaults.push("concurrency=4 (auto)");
   }
 
   let duration: number | undefined;
@@ -185,7 +183,6 @@ export function resolveSceneSettings(
   if (isVideo && (isOmni || !model) && !resolution) missing.push("resolution ('360p' or '720p')");
   if (!download_quality) missing.push(isVideo ? "download_quality ('original', '720p', '1080p', or 'upscaled')" : "download_quality ('original' 1K or 'upscaled' 2K)");
   if (quantity === undefined) missing.push("quantity (how many takes to generate, e.g. 1, 4, 8, 12 — auto-splits >4 into parallel x4 batches)");
-  if (concurrency === undefined) missing.push("concurrency (1-4 parallel Flow submissions)");
 
   if (missing.length) return { ok: false, missing, usedDefaults };
 
