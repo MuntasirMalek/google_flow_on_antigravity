@@ -1219,7 +1219,7 @@ export async function downloadCollection(name: string, dir: string): Promise<str
 // tile to our own scene name fixes it at the source - the user's suggestion, and the right one.
 async function renameTile(page: Page, tile: Locator, title: string): Promise<boolean> {
   try {
-    await hoverTile(page, tile);
+    await hoverTile(page, tile, 350);
     const more = tile.getByRole("button", { name: "More options" });
     if (!(await more.isVisible({ timeout: 3000 }).catch(() => false))) return false;
     await more.click();
@@ -1229,11 +1229,13 @@ async function renameTile(page: Page, tile: Locator, title: string): Promise<boo
       return false;
     }
     await rename.click();
-    await pause(page, 1200);
+    await pause(page, 500);
     await page.keyboard.press("ControlOrMeta+a");
-    await page.keyboard.type(title, { delay: 8 });
+    await page.keyboard.insertText(title).catch(async () => {
+      await page.keyboard.type(title, { delay: 5 });
+    });
     await page.keyboard.press("Enter");
-    await pause(page, 1500);
+    await pause(page, 700);
     return true;
   } catch {
     await page.keyboard.press("Escape").catch(() => {});
@@ -1393,8 +1395,22 @@ async function ensureProjectGrid(page: Page): Promise<void> {
   await scrollToTop(page);
 }
 
-const SUBMIT_STAGGER_MS = Math.max(1500, Number(process.env.FLOW_MCP_SUBMIT_STAGGER_S ?? 4) * 1000);
+const SUBMIT_STAGGER_MS = Math.max(1000, Number(process.env.FLOW_MCP_SUBMIT_STAGGER_S ?? 2) * 1000);
 const normPrompt = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+function sceneSettingsKey(s: Job["params"]): string {
+  const framesMode = s.type === "video" && Boolean(s.first_frame || s.last_frame);
+  const model = s.type === "image" && LEGACY_IMAGE_MODEL.test(s.model ?? "") ? LATEST_IMAGE_MODEL : (s.model ?? "");
+  return [
+    s.type,
+    framesMode ? "frames" : "ing",
+    s.aspect_ratio ?? "",
+    model,
+    s.type === "video" ? (s.resolution ?? "") : "",
+    s.type === "video" ? String(s.duration ?? "") : "",
+    String(s.variants ?? 1),
+  ].join("|");
+}
 
 async function busyTileCount(page: Page): Promise<number> {
   return page
@@ -1471,13 +1487,30 @@ export function matchParallelTile(tilePrompt: string, candidatePrompts: string[]
 }
 
 // Configures Flow's normal composer (Agent off), checks max_credits, attaches any frames/references, and submits.
-async function submitInComposer(page: Page, job: Job, allowCapacityWait: boolean): Promise<{ status: "submitted"; before: string[] } | { status: "capacity" }> {
+async function submitInComposer(
+  page: Page,
+  job: Job,
+  allowCapacityWait: boolean,
+  settingsCache?: { key: string; credits: number },
+): Promise<{ status: "submitted"; before: string[] } | { status: "capacity" }> {
   const s = job.params;
-  await ensureProjectGrid(page);
-  await ensureAgentOff(page);
+  const key = sceneSettingsKey(s);
+  const reuseSettings = Boolean(settingsCache && settingsCache.key === key);
+  if (!reuseSettings) {
+    await ensureProjectGrid(page);
+    await ensureAgentOff(page);
+  }
   await clearComposer(page);
 
-  job.credits = await applySettings(page, job);
+  if (reuseSettings && settingsCache) {
+    job.credits = settingsCache.credits;
+  } else {
+    job.credits = await applySettings(page, job);
+    if (settingsCache) {
+      settingsCache.key = key;
+      settingsCache.credits = job.credits;
+    }
+  }
   if (job.credits > s.max_credits) {
     throw new Error(
       `Flow quotes ${job.credits} credits for this scene, above max_credits=${s.max_credits}. Nothing was generated. Raise max_credits or pick a cheaper model/duration/variants.`,
@@ -1634,20 +1667,42 @@ export async function runParallelGenerations(
 
   const pending = [...jobs];
   const inFlight: ParallelSlot[] = [];
+  const readyTiles: string[] = [];
   let effectiveMax = Math.max(1, Math.min(4, maxConcurrency));
+  let capacityStreak = 0;
+  const settingsCache = { key: "", credits: 0 };
   const titleSettle = new Map<string, number>();
   let handledErrors = 0;
   let emptyPolls = 0;
+
+  // Count how many submitted jobs are STILL actively rendering in Flow (excluding tiles already finished and
+  // waiting in readyTiles to be renamed/downloaded) so Flow's generation slots stay saturated continuously.
+  const activeRenderSlots = (): number => {
+    let unallocated = readyTiles.length;
+    let active = inFlight.length;
+    for (const slot of inFlight) {
+      const rem = Math.max(0, slot.expectedVariants - slot.receivedCount);
+      if (rem === 0) {
+        active--;
+      } else if (unallocated >= rem) {
+        unallocated -= rem;
+        active--;
+      }
+    }
+    return Math.max(0, active);
+  };
 
   while (pending.length || inFlight.length) {
     if (page.isClosed()) {
       page = await getFlowPage();
       await ensureProjectGrid(page);
       await ensureAgentOff(page);
+      settingsCache.key = "";
     }
 
-    // 1. Fill open slots up to effectiveMax, staggering submissions at a human pace.
-    while (inFlight.length < effectiveMax && pending.length) {
+    // 1. Highest priority: keep Flow's parallel render slots full up to effectiveMax before spending time downloading.
+    let hitCapacity = false;
+    while (activeRenderSlots() < effectiveMax && pending.length) {
       const job = pending.shift()!;
       if (job.status !== "queued") continue;
       job.status = "running";
@@ -1655,15 +1710,22 @@ export async function runParallelGenerations(
       job.progress = "submitting";
       try {
         await prepareJob(job);
-        const res = await submitInComposer(page, job, inFlight.length > 0);
+        const res = await submitInComposer(page, job, activeRenderSlots() > 0, settingsCache);
         if (res.status === "capacity") {
           job.status = "queued";
           job.attempts = Math.max(0, job.attempts - 1);
           job.progress = "waiting for Flow slot";
           pending.unshift(job);
-          effectiveMax = Math.max(1, inFlight.length);
+          settingsCache.key = "";
+          hitCapacity = true;
+          capacityStreak++;
+          const currentActive = activeRenderSlots();
+          // Cap to Flow's actual concurrent capacity when >=2 are running; avoid permanently dropping to 1 on one hiccup.
+          if (currentActive >= 2) effectiveMax = Math.min(effectiveMax, currentActive);
+          else if (capacityStreak >= 3) effectiveMax = 1;
           break;
         }
+        capacityStreak = 0;
         const kind: MediaKind = job.params.type === "image" ? "image" : "video";
         const timeoutMs = kind === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS;
         inFlight.push({
@@ -1675,12 +1737,14 @@ export async function runParallelGenerations(
           deadline: Date.now() + timeoutMs,
           retriesLeft: job.params.retries ?? 1,
         });
-        job.progress = `rendering (${inFlight.length} in flight)`;
-        if (inFlight.length < effectiveMax && pending.length) {
-          const stagger = SUBMIT_STAGGER_MS * (0.8 + Math.random() * 0.6);
+        const activeNow = activeRenderSlots();
+        job.progress = `rendering (${activeNow} in flight)`;
+        if (activeNow < effectiveMax && pending.length) {
+          const stagger = SUBMIT_STAGGER_MS * (0.8 + Math.random() * 0.4);
           await pause(page, Math.round(stagger));
         }
       } catch (err) {
+        settingsCache.key = "";
         job.status = "failed";
         job.progress = undefined;
         job.error = err instanceof Error ? err.message : String(err);
@@ -1691,7 +1755,7 @@ export async function runParallelGenerations(
     if (!inFlight.length) continue;
 
     // 2. Poll the grid for finished tiles, live progress, and errors.
-    await pause(page, 3000);
+    if (readyTiles.length === 0) await pause(page, 2000);
     await scrollToTop(page);
 
     const progressList = await page
@@ -1704,9 +1768,10 @@ export async function runParallelGenerations(
         Math.max(8, inFlight.length * 3),
       )
       .catch(() => [] as string[]);
+    const activeCount = activeRenderSlots();
     const progText = progressList.length
-      ? `rendering (${inFlight.length} in flight: ${progressList.join(", ")})`
-      : `rendering (${inFlight.length} in flight)`;
+      ? `rendering (${activeCount} active: ${progressList.join(", ")})`
+      : `rendering (${activeCount} active, ${readyTiles.length} ready to download)`;
     for (const slot of inFlight) slot.job.progress = progText;
 
     // Scroll deeper into the virtualised grid when nothing new is visible at y=0 (e.g. tiles #7+ below the fold).
@@ -1728,16 +1793,28 @@ export async function runParallelGenerations(
       }
     }
 
-    // 3. Match each newly finished tile back to its exact in-flight job, rename, and download.
-    const downloadPhaseStart = Date.now();
     for (const id of settled) {
-      if (!inFlight.length) break;
+      knownIds.add(id);
+      titleSettle.delete(id);
+      readyTiles.push(id);
+    }
+
+    // If newly finished tiles just freed Flow render slots and more scenes are queued, refill Flow IMMEDIATELY
+    // before blocking for 20-35s on an upscale download so Flow renders continuously in parallel.
+    if (!hitCapacity && pending.length > 0 && activeRenderSlots() < effectiveMax) {
+      continue;
+    }
+
+    // 3. Pipeline AT MOST ONE finished tile download per iteration while Flow renders other scenes in parallel.
+    // After that single download finishes, loop back to Step 1/2 to immediately refill any freed render slots.
+    if (readyTiles.length > 0 && inFlight.length > 0) {
+      const downloadPhaseStart = Date.now();
+      const id = readyTiles.shift()!;
       if (page.isClosed()) {
         page = await getFlowPage();
         await ensureProjectGrid(page);
+        settingsCache.key = "";
       }
-      knownIds.add(id);
-      titleSettle.delete(id);
 
       const located = (await scrollToTile(page, id)) ?? mediaTile(page, id);
       const tileKind = await located
@@ -1750,6 +1827,8 @@ export async function runParallelGenerations(
       const allSamePrompt = pool.every((s) => s.job.params.prompt === pool[0].job.params.prompt);
       if (pool.length > 1 && !allSamePrompt) {
         const storedPrompt = await readTilePrompt(page, located);
+        // Reuse prompt may modify Flow's composer settings, so re-verify on the next submission.
+        settingsCache.key = "";
         const idx = matchParallelTile(
           storedPrompt,
           pool.map((s) => s.job.params.prompt),
@@ -1773,7 +1852,7 @@ export async function runParallelGenerations(
           knownIds.add(`title:${newTitle}`);
           job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
         }
-        await pause(page, 600);
+        await pause(page, 400);
         const stem = join(s.output_dir, label);
         const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
         const downloaded = await downloadMedia(
@@ -1806,13 +1885,10 @@ export async function runParallelGenerations(
         job.finishedAt = new Date().toISOString();
         inFlight.splice(inFlight.indexOf(chosen), 1);
       }
-      await pause(page, 600);
-    }
-    // Time spent sequentially downloading peer tiles (especially 2K/1080p upscales) is not render wait time for
-    // other slots still queued to be harvested from the grid — credit that duration back to remaining deadlines.
-    if (settled.length > 0 && inFlight.length > 0) {
+      // Credit download/upscale duration back to remaining in-flight deadlines so peer tiles never falsely time out.
       const dlElapsed = Date.now() - downloadPhaseStart;
       for (const slot of inFlight) slot.deadline += dlElapsed;
+      await pause(page, 300);
     }
 
     // 4. Handle any failed tiles (flow-error-tile) above known tiles.
@@ -1823,6 +1899,7 @@ export async function runParallelGenerations(
       let target = inFlight[0];
       if (inFlight.length > 1) {
         const errPrompt = await readTilePrompt(page, errTile);
+        settingsCache.key = "";
         const idx = matchParallelTile(
           errPrompt,
           inFlight.map((s) => s.job.params.prompt),
@@ -1864,8 +1941,8 @@ export async function runParallelGenerations(
     }
 
     // 5. Fail any individual slot that exceeded its render timeout without aborting healthy peers.
-    // Skip expiring on iterations where we just harvested/downloaded tiles so finished peers get polled next turn.
-    if (settled.length === 0) {
+    // Skip expiring while tiles were just discovered or are waiting in readyTiles to be harvested.
+    if (settled.length === 0 && readyTiles.length === 0) {
       const now = Date.now();
       for (let i = inFlight.length - 1; i >= 0; i--) {
         if (now > inFlight[i].deadline) {

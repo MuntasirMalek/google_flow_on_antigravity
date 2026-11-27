@@ -142,7 +142,7 @@ Both **Shots** and **Frames** tabs include **Quantity** (with `>4` automatic par
 
 ## Environment Variables
 
-`FLOW_MCP_CHROME`, `FLOW_MCP_CDP_PORT` (`9333`), `FLOW_MCP_PORT` (`8787`), `FLOW_MCP_OUTPUT` (`~/Downloads`, falling back to `~/flow-mcp-out`), `FLOW_MCP_HOME` (`~/.flow-mcp`), `FLOW_MCP_CONCURRENCY` (`1`–`4`, default `4`), `FLOW_MCP_FFMPEG_THREADS` (default half CPU cores), `FLOW_MCP_SUBMIT_STAGGER_S` (`4`), `FLOW_MCP_PAUSE_MIN_S` (`25`), `FLOW_MCP_PAUSE_MAX_S` (`70`), `GEMINI_API_KEY`.
+`FLOW_MCP_CHROME`, `FLOW_MCP_CDP_PORT` (`9333`), `FLOW_MCP_PORT` (`8787`), `FLOW_MCP_OUTPUT` (`~/Downloads`, falling back to `~/flow-mcp-out`), `FLOW_MCP_HOME` (`~/.flow-mcp`), `FLOW_MCP_CONCURRENCY` (`1`–`4`, default `4`), `FLOW_MCP_FFMPEG_THREADS` (default half CPU cores), `FLOW_MCP_SUBMIT_STAGGER_S` (`2`), `FLOW_MCP_PAUSE_MIN_S` (`25`), `FLOW_MCP_PAUSE_MAX_S` (`70`), `GEMINI_API_KEY`.
 
 ---
 

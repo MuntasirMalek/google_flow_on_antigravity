@@ -164,7 +164,7 @@ export const shapes = {
       .max(4)
       .optional()
       .describe(
-        "How many independent scenes Flow may render at the same time through the normal composer (Flow Agent off). Default 1 (or FLOW_MCP_CONCURRENCY). Chained scenes (chain_previous / reference_previous) always stay serial.",
+        "How many independent scenes Flow may render at the same time through the normal composer (Flow Agent off). Default 4 (or saved global concurrency / FLOW_MCP_CONCURRENCY). Chained scenes (chain_previous / reference_previous) always stay serial.",
       ),
   },
   wait: {

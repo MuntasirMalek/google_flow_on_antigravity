@@ -64,7 +64,7 @@ export type BatchRunner = (jobs: Job[], concurrency: number) => Promise<void>;
 // normal composer (Agent off), while chained scenes remain strictly serial.
 const PAUSE_MIN_MS = Number(process.env.FLOW_MCP_PAUSE_MIN_S ?? 25) * 1000;
 const PAUSE_MAX_MS = Number(process.env.FLOW_MCP_PAUSE_MAX_S ?? 70) * 1000;
-export const DEFAULT_CONCURRENCY = Math.max(1, Math.min(4, Math.floor(Number(process.env.FLOW_MCP_CONCURRENCY ?? 1)) || 1));
+export const DEFAULT_CONCURRENCY = Math.max(1, Math.min(4, Math.floor(Number(process.env.FLOW_MCP_CONCURRENCY ?? 4)) || 4));
 
 function effectiveConcurrency(job: Job): number {
   const n = job.params.concurrency ?? DEFAULT_CONCURRENCY;
