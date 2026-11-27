@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -10,6 +10,8 @@ import { FFMPEG_HINT } from "./platform.js";
 const run = promisify(execFile);
 const FFMPEG = process.env.FLOW_MCP_FFMPEG ?? "ffmpeg";
 const FFPROBE = process.env.FLOW_MCP_FFPROBE ?? "ffprobe";
+// Keep half the machine's CPU cores free while encoding so everyday apps stay responsive.
+const FFMPEG_THREADS = String(Math.max(1, Number(process.env.FLOW_MCP_FFMPEG_THREADS) || Math.max(2, Math.floor(cpus().length / 2))));
 
 export interface AssembleOptions {
   dir: string;
@@ -548,7 +550,7 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
   args.push(
     "-filter_complex", filters.join(";"),
     "-map", picture, "-map", "[a]",
-    "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
+    "-threads", FFMPEG_THREADS, "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
     output,
   );
@@ -580,7 +582,7 @@ export async function assemble(o: AssembleOptions): Promise<{ output: string; cl
       });
       const fixed = output.replace(/\.mp4$/, "") + "-ghosts.mp4";
       try {
-        await run(FFMPEG, ["-y", "-v", "error", "-i", output, "-vf", steps.join(","), "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", fixed], { maxBuffer: 32 * 1024 * 1024 });
+        await run(FFMPEG, ["-y", "-v", "error", "-i", output, "-vf", steps.join(","), "-threads", FFMPEG_THREADS, "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", fixed], { maxBuffer: 32 * 1024 * 1024 });
         renameSync(fixed, output);
       } finally {
         rmSync(dir, { recursive: true, force: true });

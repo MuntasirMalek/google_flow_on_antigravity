@@ -86,6 +86,14 @@ async function launchChrome(): Promise<void> {
       `--remote-debugging-port=${CDP_PORT}`,
       "--no-first-run",
       "--no-default-browser-check",
+      // Keep Flow working reliably when covered behind your everyday Brave/apps without stealing focus or audio.
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-features=CalculateNativeWinOcclusion",
+      "--mute-audio",
+      "--disable-extensions",
+      "--window-size=1280,820",
       inEnglish(FLOW_URL),
     ],
     { detached: true, stdio: "ignore" },
@@ -114,6 +122,12 @@ export async function getFlowPage(): Promise<Page> {
     allPages.find((p) => /^https:\/\/flow\.google\.com\/project\//.test(p.url())) ??
     allPages.find((p) => FLOW_HOSTS.test(p.url()));
   if (existing) {
+    // Close stray blank tabs in the dedicated automation profile so idle RAM stays low.
+    for (const p of allPages) {
+      if (p !== existing && (p.url() === "about:blank" || p.url().startsWith("chrome://newtab"))) {
+        await p.close().catch(() => {});
+      }
+    }
     await ensureEnglish(existing);
     return existing;
   }

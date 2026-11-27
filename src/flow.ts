@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { cpus, homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { promisify } from "node:util";
 import type { CDPSession, Locator, Page } from "playwright-core";
@@ -11,6 +11,18 @@ import { extractZip } from "./platform.js";
 const runExec = promisify(execFile);
 const FFMPEG_BIN = process.env.FLOW_MCP_FFMPEG ?? "ffmpeg";
 const FFPROBE_BIN = process.env.FLOW_MCP_FFPROBE ?? "ffprobe";
+const FFMPEG_THREADS = String(Math.max(1, Number(process.env.FLOW_MCP_FFMPEG_THREADS) || Math.max(2, Math.floor(cpus().length / 2))));
+
+// Pause auto-playing video tiles in Flow's grid once a run finishes so an idle background Flow tab doesn't burn CPU.
+async function pauseIdleMedia(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document.querySelectorAll("video").forEach((v) => {
+      try {
+        v.pause();
+      } catch {}
+    });
+  }).catch(() => {});
+}
 
 // When the user asks for 1080p download on a 360p-generated clip, Flow's own menu caps at "720p Upscaled".
 // Finish the upscale locally to true 1080p (1920x1080 or 1080x1920) via FFmpeg at 0 extra credits so the user gets
@@ -26,7 +38,7 @@ async function ensure1080pVideo(file: string, job?: Job): Promise<void> {
     await runExec(FFMPEG_BIN, [
       "-v", "error", "-y", "-i", file,
       "-vf", `scale=${scale}:flags=lanczos,unsharp=5:5:0.4:5:5:0.0`,
-      "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+      "-threads", FFMPEG_THREADS, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
       "-c:a", "copy", "-movflags", "+faststart", tmp,
     ]);
     renameSync(tmp, file);
@@ -812,9 +824,8 @@ async function waitForDownloadedFile(page: Page, before: Set<string>, timeoutMs:
   const deadline = startedAt + timeoutMs;
   let stable: { path: string; size: number } | undefined;
   while (Date.now() < deadline) {
-    // Every quarter second: an image is there in well under a second, and a size that held still across two checks
-    // still proves Chrome has finished writing it.
-    await pause(page, 250);
+    // Every half second: keeps background disk polling light while catching finished downloads promptly.
+    await pause(page, 500);
     // Prefer our isolated download folder first; only inspect the shared ~/Downloads folder with Flow filename
     // filtering so unrelated personal downloads are never hijacked.
     const candidates: string[] = [];
@@ -1576,6 +1587,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
     files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined, renamed ? newTitle : undefined)));
     await pause(page, 1200);
   }
+  await pauseIdleMedia(page);
   return files;
 }
 
@@ -1679,7 +1691,7 @@ export async function runParallelGenerations(
     if (!inFlight.length) continue;
 
     // 2. Poll the grid for finished tiles, live progress, and errors.
-    await pause(page, 2500);
+    await pause(page, 3000);
     await scrollToTop(page);
 
     const progressList = await page
@@ -1867,6 +1879,7 @@ export async function runParallelGenerations(
       }
     }
   }
+  await pauseIdleMedia(page);
 }
 
 export interface FlowAsset {

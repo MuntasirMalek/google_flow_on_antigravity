@@ -18,7 +18,7 @@ Antigravity (/flow) ──stdio──> flow-mcp ──CDP (port 9333)──> Ded
 - **Global Rules (`flow_defaults`) + Ask-Only-What's-Missing Enforcement:** Save any subset of favorite rules once in `~/.flow-mcp/defaults.json` (e.g., *"always use Omni 1.1 Flash, gen 360p, download 720p, 3 parallel"*). `flow_generate` merges your global rules with explicit per-call overrides and **refuses to guess** any unset required setting — so the assistant asks **only** for settings you haven't locked globally.
 - **Strict Model Verification & Paid-Upscale Guard:** Verifies Flow's model dropdown actually switched to your requested model before spending credits; supports explicit `download_quality` (`original`, `720p`, `1080p`, `upscaled`) and checks paid upscales (e.g. `720p Upscaled · 1 credit`) against `max_credits`.
 - **Auto-Dismiss Flow Onboarding & Default Agent Side Panel:** Automatically steps through Flow's `<flow-change-log-modal>` (`iframe[title="Changelog"]`) and closes the default Agent side panel (`right_panel_close`) on fresh profiles.
-- **Zero-Popup Dedicated Brave & Chrome Support:** Automatically falls back to Brave if Chrome isn't installed, or set `FLOW_MCP_CHROME` to Brave. Uses an isolated persistent profile (`~/.flow-mcp/chrome-profile`) — sign in **once**, and it stays signed in across window closes and reboots with zero remote-debugging popups.
+- **Zero-Popup, Background-Friendly Brave & Chrome Automation:** Automatically falls back to Brave if Chrome isn't installed (or set `FLOW_MCP_CHROME`). Runs in an isolated persistent profile (`~/.flow-mcp/chrome-profile`) completely separate from your everyday browser — works smoothly behind your other windows with background-occlusion throttling disabled, audio muted, extensions disabled, idle grid videos auto-paused, and FFmpeg CPU threads capped so your machine stays fast while you work. Sign in **once**, zero remote-debugging or Save As popups.
 - **Shared `~/Downloads` Protection & UK English (`en-GB`) Support:** Filters `~/Downloads` fallback strictly to Flow downloads (`isFlowDownloadName`) so unrelated personal files are never moved, and supports both `Move to trash` and `Move to bin`.
 
 ---
@@ -132,7 +132,7 @@ Both **Shots** and **Frames** tabs include **Quantity** (with `>4` automatic par
 
 ## Environment Variables
 
-`FLOW_MCP_CHROME`, `FLOW_MCP_CDP_PORT` (`9333`), `FLOW_MCP_PORT` (`8787`), `FLOW_MCP_OUTPUT` (`~/Downloads`, falling back to `~/flow-mcp-out`), `FLOW_MCP_HOME` (`~/.flow-mcp`), `FLOW_MCP_CONCURRENCY` (`1`–`4`, default `4`), `FLOW_MCP_SUBMIT_STAGGER_S` (`4`), `FLOW_MCP_PAUSE_MIN_S` (`25`), `FLOW_MCP_PAUSE_MAX_S` (`70`), `GEMINI_API_KEY`.
+`FLOW_MCP_CHROME`, `FLOW_MCP_CDP_PORT` (`9333`), `FLOW_MCP_PORT` (`8787`), `FLOW_MCP_OUTPUT` (`~/Downloads`, falling back to `~/flow-mcp-out`), `FLOW_MCP_HOME` (`~/.flow-mcp`), `FLOW_MCP_CONCURRENCY` (`1`–`4`, default `4`), `FLOW_MCP_FFMPEG_THREADS` (default half CPU cores), `FLOW_MCP_SUBMIT_STAGGER_S` (`4`), `FLOW_MCP_PAUSE_MIN_S` (`25`), `FLOW_MCP_PAUSE_MAX_S` (`70`), `GEMINI_API_KEY`.
 
 ---
 
