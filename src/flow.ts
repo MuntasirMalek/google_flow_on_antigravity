@@ -316,7 +316,16 @@ export async function freshMedia(page: Page, before: string[], kind?: MediaKind)
     },
     TILE_ID_JS,
   );
-  const ours = tiles.filter((t) => t.id && !before.includes(t.id) && !t.label.startsWith("fm-") && !t.busy && (!kind || t.kind === kind));
+  const beforeSet = new Set(before);
+  const ours = tiles.filter(
+    (t) =>
+      t.id &&
+      !beforeSet.has(t.id) &&
+      !(t.label && beforeSet.has(`title:${t.label}`)) &&
+      !t.label.startsWith("fm-") &&
+      !t.busy &&
+      (!kind || t.kind === kind),
+  );
   return [...new Set(ours.map((t) => t.id!))];
 }
 
@@ -593,38 +602,113 @@ async function typePrompt(page: Page, prompt: string): Promise<void> {
 
 export type DownloadQuality = "original" | "720p" | "1080p" | "upscaled";
 
-export async function downloadMedia(page: Page, mediaId: string, targetStem: string, quality: DownloadQuality = "original", job?: Job, variantStart?: number): Promise<string[]> {
-  // A tile that has just finished rendering is still settling and the grid re-renders around it, so give it a moment.
+// Finds a tile anywhere in Flow's virtualised grid by media id OR title, scrolling .page-container only when needed.
+// Prevents tiles #7+ (which Flow's virtual scroller unmounts when scrolled back to y=0) from ever being "lost".
+async function scrollToTile(page: Page, mediaId: string, fallbackTitle?: string): Promise<Locator | null> {
+  const findNow = async (): Promise<Locator | null> => {
+    const byId = mediaTile(page, mediaId);
+    if ((await byId.count().catch(() => 0)) > 0 && (await byId.isVisible().catch(() => false))) return byId;
+    if (fallbackTitle) {
+      const byTitle = page.locator(`flow-grid-tile-container[aria-label="${fallbackTitle.replace(/"/g, '\\"')}"]:has([src])`).first();
+      if ((await byTitle.count().catch(() => 0)) > 0 && (await byTitle.isVisible().catch(() => false))) return byTitle;
+      const byTitleAny = page.locator(`flow-grid-tile-container[aria-label="${fallbackTitle.replace(/"/g, '\\"')}"]`).first();
+      if ((await byTitleAny.count().catch(() => 0)) > 0 && (await byTitleAny.isVisible().catch(() => false))) return byTitleAny;
+    }
+    return null;
+  };
+
+  // Fast path: already mounted and visible at current scroll position (e.g. right after renameTile).
+  const immediate = await findNow();
+  if (immediate) return immediate;
+
+  // Walk the virtualised grid from top to bottom until the tile mounts.
   await scrollToTop(page);
-  await pause(page, 2500);
-  const tile = mediaTile(page, mediaId);
-  await tile.waitFor({ state: "visible", timeout: 30_000 }).catch(() => {
+  await pause(page, 600);
+  for (let step = 0; step < 60; step++) {
+    const hit = await findNow();
+    if (hit) return hit;
+    const moved = await page
+      .evaluate(() => {
+        const el = document.querySelector(".page-container");
+        if (!el) return false;
+        const before = el.scrollTop;
+        el.scrollTop = before + Math.max(240, el.clientHeight * 0.75);
+        return el.scrollTop > before;
+      })
+      .catch(() => false);
+    if (!moved) break;
+    await pause(page, 500);
+  }
+  return findNow();
+}
+
+// Scans the virtualised grid for newly finished tiles not yet in `known`. Checks top of grid first (fast path),
+// and only scrolls deeper when nothing new is visible at y=0 so tiles #7+ below the fold are never missed.
+async function freshMediaWithScroll(page: Page, known: string[], kind?: MediaKind, deepScan = false): Promise<string[]> {
+  const top = await freshMedia(page, known, kind);
+  if (top.length || !deepScan) return top;
+  const found: string[] = [];
+  const seen = new Set<string>(known);
+  await scrollToTop(page);
+  for (let step = 0; step < 25; step++) {
+    const hits = await freshMedia(page, [...seen], kind);
+    for (const id of hits) {
+      seen.add(id);
+      found.push(id);
+    }
+    if (found.length) break;
+    const moved = await page
+      .evaluate(() => {
+        const el = document.querySelector(".page-container");
+        if (!el) return false;
+        const before = el.scrollTop;
+        el.scrollTop = before + Math.max(240, el.clientHeight * 0.75);
+        return el.scrollTop > before;
+      })
+      .catch(() => false);
+    if (!moved) break;
+    await pause(page, 450);
+  }
+  return found;
+}
+
+export async function downloadMedia(
+  page: Page,
+  mediaId: string,
+  targetStem: string,
+  quality: DownloadQuality = "original",
+  job?: Job,
+  variantStart?: number,
+  fallbackTitle?: string,
+): Promise<string[]> {
+  // Let a freshly finished or renamed tile settle, then locate it without blindly scrolling it off-screen.
+  await pause(page, 1200);
+  let tile = await scrollToTile(page, mediaId, fallbackTitle);
+  if (!tile) {
+    await pause(page, 2500);
+    tile = await scrollToTile(page, mediaId, fallbackTitle);
+  }
+  if (!tile) {
+    const label = fallbackTitle ?? (mediaId.startsWith("title:") ? mediaId.slice(6) : undefined);
     throw new Error(
-      `The finished file is in Flow but could not be found again in the grid${mediaId.startsWith("title:") ? ` (looked for "${mediaId.slice(6)}")` : ""}. ` +
+      `The finished file is in Flow but could not be found again in the grid${label ? ` (looked for "${label}")` : ""}. ` +
         `Nothing is lost: flow_download fetches it by its title without spending credits again.`,
     );
-  });
-  // Grab the title NOW, while the id still resolves, so the download can re-find this exact tile later even if the
+  }
+  // Grab the title NOW, while the id still resolves, so retries can re-find this exact tile even if the
   // virtualised grid unmounts and remounts it between steps.
-  const title = (await tile.getAttribute("aria-label").catch(() => null)) ?? undefined;
+  const title = fallbackTitle ?? ((await tile.getAttribute("aria-label").catch(() => null)) || undefined);
   return downloadTile(page, tileByIdOrTitle(page, mediaId, title), targetStem, quality, title, job, variantStart);
 }
 
 type TileResolver = () => Promise<Locator>;
 
-// Re-finds the tile on every attempt instead of trusting one handle that may have been unmounted by the virtual grid:
-// by id first, then by title. NOT a confirmed root cause for the post-generation download failures - the failure has
-// never reproduced on a settled tile - but it removes one whole class of staleness, and the menu dump below is what
-// will actually explain the next one. An empty "Untitled Scene" placeholder holds no media and its menu has no
-// Download, so :has([src]) makes sure we never grab one by title.
+// Re-finds the tile on every attempt (scrolling the virtualised grid if needed) instead of trusting one handle that
+// may have been unmounted by Flow's virtual scroller: by id first, then by title.
 function tileByIdOrTitle(page: Page, id: string, title?: string): TileResolver {
   return async () => {
-    const byId = mediaTile(page, id);
-    if (await byId.count()) return byId;
-    if (title) {
-      const byTitle = page.locator(`flow-grid-tile-container[aria-label="${title.replace(/"/g, '\\"')}"]:has([src])`).first();
-      if (await byTitle.count()) return byTitle;
-    }
+    const found = await scrollToTile(page, id, title);
+    if (found) return found;
     throw new Error(
       `The finished tile is no longer in the grid${title ? ` ("${title}")` : ""}. The media is still in Flow: flow_download fetches it without spending credits again.`,
     );
@@ -638,12 +722,16 @@ let downloadsReady = false;
 // directory we own makes the bytes ours the moment they land.
 async function useOwnDownloadDir(page: Page): Promise<void> {
   // Setting this once per process was not enough: another CDP client attaching resets it browser-wide, and Chrome
-  // quietly goes back to ~/Downloads. Every file we "could not download" tonight was sitting there the whole time,
-  // so this is re-asserted before every single download rather than cached behind a flag.
+  // quietly goes back to ~/Downloads. Re-assert before every download, and always detach the CDP session afterwards
+  // so large multi-image/video batches never leak dozens of open DevTools sessions.
   mkdirSync(DOWNLOAD_DIR, { recursive: true });
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: DOWNLOAD_DIR, eventsEnabled: true }).catch(() => {});
-  downloadsReady = true;
+  try {
+    await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: DOWNLOAD_DIR, eventsEnabled: true }).catch(() => {});
+    downloadsReady = true;
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
 }
 
 // Chrome's own Downloads folder, where files land whenever the override above has been reset out from under us.
@@ -1428,16 +1516,17 @@ export async function runGeneration(job: Job): Promise<string[]> {
     // neither can be found by name afterwards. Renaming each finished tile to the scene's own file stem makes every
     // later lookup - download, continue, assemble - unambiguous. Best effort: a failed rename must not lose the clip.
     const newTitle = `${basename(s.output_dir)}-${label}`;
-    const renamed = await renameTile(page, mediaTile(page, id), newTitle).catch(() => false);
+    const tileForRename = (await scrollToTile(page, id)) ?? mediaTile(page, id);
+    const renamed = await renameTile(page, tileForRename, newTitle).catch(() => false);
     if (renamed) job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
-    await pause(page, 800);
+    await pause(page, 600);
     const stem = join(s.output_dir, label);
     // A video at rest has no media id, so it is tracked by its title - which the rename just changed. Looking for the
     // old title failed every such download after 30 s ("locator.waitFor: Timeout 30000ms exceeded ... aria-label=
     // <the prompt>", reported by a user, 2026-10-15) while the clip sat finished and renamed in Flow.
     const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined)));
-    await pause(page, 1500);
+    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined, renamed ? newTitle : undefined)));
+    await pause(page, 1200);
   }
   return files;
 }
@@ -1447,6 +1536,7 @@ interface ParallelSlot {
   kind: MediaKind;
   expectedVariants: number;
   receivedCount: number;
+  tileErrors: string[];
   deadline: number;
   retriesLeft: number;
 }
@@ -1471,7 +1561,7 @@ export async function runParallelGenerations(
     return;
   }
 
-  const page = await getFlowPage();
+  let page = await getFlowPage();
   await ensureProjectGrid(page);
   await ensureAgentOff(page);
 
@@ -1487,8 +1577,15 @@ export async function runParallelGenerations(
   let effectiveMax = Math.max(1, Math.min(4, maxConcurrency));
   const titleSettle = new Map<string, number>();
   let handledErrors = 0;
+  let emptyPolls = 0;
 
   while (pending.length || inFlight.length) {
+    if (page.isClosed()) {
+      page = await getFlowPage();
+      await ensureProjectGrid(page);
+      await ensureAgentOff(page);
+    }
+
     // 1. Fill open slots up to effectiveMax, staggering submissions at a human pace.
     while (inFlight.length < effectiveMax && pending.length) {
       const job = pending.shift()!;
@@ -1514,6 +1611,7 @@ export async function runParallelGenerations(
           kind,
           expectedVariants: job.params.variants ?? 1,
           receivedCount: 0,
+          tileErrors: [],
           deadline: Date.now() + timeoutMs,
           retriesLeft: job.params.retries ?? 1,
         });
@@ -1551,7 +1649,11 @@ export async function runParallelGenerations(
       : `rendering (${inFlight.length} in flight)`;
     for (const slot of inFlight) slot.job.progress = progText;
 
-    const fresh = await freshMedia(page, [...knownIds]);
+    // Scroll deeper into the virtualised grid when nothing new is visible at y=0 (e.g. tiles #7+ below the fold).
+    const deepScan = emptyPolls >= 2 || progressList.length === 0;
+    const fresh = await freshMediaWithScroll(page, [...knownIds], undefined, deepScan);
+    emptyPolls = fresh.length ? 0 : emptyPolls + 1;
+
     const settled: string[] = [];
     const currentTitles = new Set(fresh.filter((id) => id.startsWith("title:")));
     for (const k of [...titleSettle.keys()]) if (!currentTitles.has(k)) titleSettle.delete(k);
@@ -1570,19 +1672,24 @@ export async function runParallelGenerations(
     const downloadPhaseStart = Date.now();
     for (const id of settled) {
       if (!inFlight.length) break;
+      if (page.isClosed()) {
+        page = await getFlowPage();
+        await ensureProjectGrid(page);
+      }
       knownIds.add(id);
       titleSettle.delete(id);
 
-      const tile = mediaTile(page, id);
-      const tileKind = await tile
+      const located = (await scrollToTile(page, id)) ?? mediaTile(page, id);
+      const tileKind = await located
         .evaluate((el) => (el.querySelector("flow-video-tile") ? "video" : el.querySelector("flow-image-tile") ? "image" : ""))
         .catch(() => "");
       const candidates = tileKind ? inFlight.filter((s) => s.kind === tileKind) : inFlight;
       const pool = candidates.length ? candidates : inFlight;
 
       let chosen = pool[0];
-      if (pool.length > 1) {
-        const storedPrompt = await readTilePrompt(page, tile);
+      const allSamePrompt = pool.every((s) => s.job.params.prompt === pool[0].job.params.prompt);
+      if (pool.length > 1 && !allSamePrompt) {
+        const storedPrompt = await readTilePrompt(page, located);
         const idx = matchParallelTile(
           storedPrompt,
           pool.map((s) => s.job.params.prompt),
@@ -1600,7 +1707,8 @@ export async function runParallelGenerations(
       const newTitle = `${basename(s.output_dir)}-${label}`;
       job.progress = "downloading";
       try {
-        const renamed = await renameTile(page, mediaTile(page, id), newTitle).catch(() => false);
+        const tileForRename = (await scrollToTile(page, id)) ?? mediaTile(page, id);
+        const renamed = await renameTile(page, tileForRename, newTitle).catch(() => false);
         if (renamed) {
           knownIds.add(`title:${newTitle}`);
           job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
@@ -1608,24 +1716,37 @@ export async function runParallelGenerations(
         await pause(page, 600);
         const stem = join(s.output_dir, label);
         const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-        const downloaded = await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined);
+        const downloaded = await downloadMedia(
+          page,
+          handle,
+          stem,
+          s.download_quality,
+          job,
+          multi ? variantNum : undefined,
+          renamed ? newTitle : undefined,
+        );
         job.files.push(...downloaded);
         chosen.receivedCount += Math.max(1, downloaded.length);
-        if (chosen.receivedCount >= chosen.expectedVariants) {
-          job.status = "done";
-          job.progress = undefined;
-          job.error = undefined;
-          job.finishedAt = new Date().toISOString();
-          inFlight.splice(inFlight.indexOf(chosen), 1);
-        }
       } catch (err) {
-        job.status = "failed";
+        const msg = err instanceof Error ? err.message : String(err);
+        chosen.tileErrors.push(`${label}: ${msg}`);
+        job.note = [job.note, `failed ${label}: ${msg}`].filter(Boolean).join(" · ");
+        // Count this tile slot as consumed so sibling variants (e.g. v8 after v7) still finish cleanly.
+        chosen.receivedCount += 1;
+      }
+      if (chosen.receivedCount >= chosen.expectedVariants) {
+        if (chosen.tileErrors.length && job.files.length === 0) {
+          job.status = "failed";
+          job.error = chosen.tileErrors.join("; ");
+        } else {
+          job.status = "done";
+          job.error = undefined;
+        }
         job.progress = undefined;
-        job.error = err instanceof Error ? err.message : String(err);
         job.finishedAt = new Date().toISOString();
         inFlight.splice(inFlight.indexOf(chosen), 1);
       }
-      await pause(page, 800);
+      await pause(page, 600);
     }
     // Time spent sequentially downloading peer tiles (especially 2K/1080p upscales) is not render wait time for
     // other slots still queued to be harvested from the grid — credit that duration back to remaining deadlines.
