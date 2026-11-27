@@ -462,7 +462,7 @@ const blank = () => ({ prompt: "", technique: "", chain: false, match: false, fi
 const DEFAULTS = {
   tab: "cast",
   frames: { project: "MyFilm", aspect: "16:9", variants: 1, concurrency: 1, engine: "exact", scenes: [blank()] },
-  shots: { project: "MyFilm", model: "Omni 1.2 Flash", aspect: "16:9", duration: 8, resolution: "720p", variants: 1, concurrency: 1, quality: "original", max: 25, scenes: [blank()] },
+  shots: { project: "MyFilm", model: "Omni 1.2 Flash", aspect: "16:9", duration: 15, resolution: "360p", variants: 1, concurrency: 4, quality: "upscaled", max: 25, scenes: [blank()] },
   narrate: { project: "MyFilm", engine: "kokoro", kokoroVoice: "am_michael", speed: 100, geminiVoice: "Charon", text: "", style: "" },
   cut: { project: "MyFilm", music: null, voiceover: null, hold: true, clips: [] },
   captions: { video: null, style: "bold", position: "bottom", size: 100, colors: {}, text: "" },

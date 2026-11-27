@@ -31,22 +31,21 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
    - **NEVER ask for `quantity` if the user already stated a count** (e.g. *"9 cyberpunk dog images"* → `quantity: 9`).
    - Compare what the user already gave + `defaults` from step 1 against the required fields:
      - **Video scenes (`type: "video"`):**
-       - `model` (`Omni 1.2 Flash`, `Omni 1.1 Flash`, `Veo 3.1 - Lite`)
-       - `duration` (`3`–`15` s on Omni 1.2; `4`/`6`/`8`/`10` s on Omni 1.1; fixed `8` s on Veo 3.1)
+       - `model` (`Omni 1.2 Flash` **(Recommended)**, `Omni 1.1 Flash`, `Veo 3.1 - Lite`)
+       - `duration` (`15` s **(Recommended)**, `10` s, `8` s, `6` s, `4` s — Omni 1.2 accepts `3`–`15` s; Omni 1.1 `4`/`6`/`8`/`10` s; Veo 3.1 fixed `8` s; for longer total films like 30s, ask per-clip length e.g. `2×15s` vs `3×10s`)
        - `resolution` (`360p` **(Recommended)** or `720p`, for Omni models)
        - `download_quality` (`720p` **(Recommended)**, `original` matching gen resolution, `1080p`, or `upscaled`)
-       - `aspect_ratio` (`16:9` or `9:16`)
-       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
+       - `aspect_ratio` (`16:9` **(Recommended)** or `9:16`)
+       - `quantity` (`1` **(Recommended)**, `2`, `4`, or any number `1`–`100` — always ask variation/quantity for video unless saved globally or explicitly stated as a variation count; quantities above 4 automatically split into parallel `x4` batches)
      - **Image scenes (`type: "image"`):**
-       - `model` (`latest` / `Nano Banana 2.1`, `Nano Banana Pro`, `Nano Banana 2 Lite`)
-       - `aspect_ratio` (`16:9`, `9:16`, `1:1`, `4:3`, `3:4`)
+       - `model` (`latest` / `Nano Banana 2.1` **(Recommended)**, `Nano Banana Pro`, `Nano Banana 2 Lite`)
+       - `aspect_ratio` (`16:9` **(Recommended)**, `9:16`, `1:1`, `4:3`, `3:4`)
        - `download_quality` (`upscaled` 2K **(Recommended)** or `original` 1K)
        - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
-   - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** unless it is saved in global defaults (keep it short; no filler questions). In multiple-choice prompts, put:
-     - **Images — Download quality:** **`(Recommended) Upscaled (2K)`** first, `Original (1K)` second.
-     - **Videos — Generation resolution:** **`(Recommended) 360p`** first, `720p` second.
-     - **Videos — Download quality:** **`(Recommended) 720p`** first, `Original (same as gen)`, `1080p`.
-   - Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs.
+   - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** (and for videos, always include **length** and **variation/quantity**) unless saved in global defaults. Keep it short; no filler questions. In multiple-choice prompts, always put these first as `(Recommended)`:
+     - **Images:** Model `Nano Banana 2.1 (latest)`, Aspect `16:9`, Download quality **`Upscaled (2K)`**.
+     - **Videos:** Model **`Omni 1.2 Flash`**, Clip length **`15s`**, Generate quality **`360p`**, Download quality **`720p`**, Variation/quantity **`1`**, Aspect **`16:9`**.
+   - Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs (or `/flow-reset` to clear saved rules).
 
 4. **Confirm credit spend before paid runs**
    - Images cost **0 credits** (both 1K and 2K download).
