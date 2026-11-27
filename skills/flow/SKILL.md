@@ -47,10 +47,11 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
      - **Videos:** Model **`Omni 1.2 Flash`**, Clip length **`15s`**, Generate quality **`360p`**, Download quality **`720p`**, Variation/quantity **`1`**, Aspect **`16:9`**.
    - Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs (or `/flow-reset` to clear saved rules).
 
-4. **Confirm credit spend before paid runs**
+4. **Execute immediately after the user answers — NEVER ask a second confirmation round**
+   - Once the user answers their settings once, queue the generation right away — do **NOT** ask a second round of follow-up questions.
    - Images cost **0 credits** (both 1K and 2K download).
-   - For videos, compute and state the expected total credits before queueing (e.g. Omni 1.2 Flash 360p = 1 cr/s up to 10 s, 720p = 3 cr/s up to 10 s; Omni 1.1 Flash 360p = 4/5/6/7 cr, 720p = 7/10/12/15 cr; Veo 3.1 Lite = 10 cr).
-   - When generating `360p` videos with `download_quality: "720p"`, note that Flow may charge +1 credit for the 720p upscale and leave `+1` credit headroom per clip in `max_credits` so the 720p download is not skipped.
+   - If the user picks `360p` generate + `1080p` download on video, execute immediately: Flow downloads its `720p Upscaled` and `flow-mcp` automatically finishes the clip to `1080p` (`1920×1080` / `1080×1920`) locally via FFmpeg at 0 extra credits (and pass `size: "1920x1080"` or `"1080x1920"` to `flow_assemble` when stitching).
+   - Set `max_credits` with headroom for Flow's paid `720p` upscale on `360p` clips (e.g. `25` for a 15s 360p clip = `20` gen + `5` upscale) so downloads are never skipped. Only stop early if the user's actual credit balance is genuinely too low to cover the requested clips.
 
 5. **Queue, wait, and report**
    - Send all scenes in one `flow_generate` call with the confirmed settings. Outputs automatically download to `~/Downloads/<project>/` (or `FLOW_MCP_OUTPUT`).

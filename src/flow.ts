@@ -1,10 +1,40 @@
+import { execFile } from "node:child_process";
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
+import { promisify } from "node:util";
 import type { CDPSession, Locator, Page } from "playwright-core";
 import { CAST_DIR, HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
+
+const runExec = promisify(execFile);
+const FFMPEG_BIN = process.env.FLOW_MCP_FFMPEG ?? "ffmpeg";
+const FFPROBE_BIN = process.env.FLOW_MCP_FFPROBE ?? "ffprobe";
+
+// When the user asks for 1080p download on a 360p-generated clip, Flow's own menu caps at "720p Upscaled".
+// Finish the upscale locally to true 1080p (1920x1080 or 1080x1920) via FFmpeg at 0 extra credits so the user gets
+// 1080p automatically without a second confirmation prompt.
+async function ensure1080pVideo(file: string, job?: Job): Promise<void> {
+  if (!/\.mp4$/i.test(file)) return;
+  try {
+    const { stdout } = await runExec(FFPROBE_BIN, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file]);
+    const [w, h] = stdout.trim().split(",").map(Number);
+    if (!w || !h || Math.min(w, h) >= 1080) return;
+    const scale = w >= h ? "1920:1080" : "1080:1920";
+    const tmp = `${file}.1080p.tmp.mp4`;
+    await runExec(FFMPEG_BIN, [
+      "-v", "error", "-y", "-i", file,
+      "-vf", `scale=${scale}:flags=lanczos,unsharp=5:5:0.4:5:5:0.0`,
+      "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+      "-c:a", "copy", "-movflags", "+faststart", tmp,
+    ]);
+    renameSync(tmp, file);
+    if (job) job.note = [job.note, `finished to 1080p (${scale.replace(":", "x")}) locally`].filter(Boolean).join(" · ");
+  } catch {
+    // FFmpeg unavailable or failed — keep Flow's 720p download intact.
+  }
+}
 
 export interface FlowState {
   url: string;
@@ -1263,6 +1293,9 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
         const target = `${targetStem}${kind}`;
         renameSync(file, target);
         saved = [target];
+      }
+      if (quality === "1080p") {
+        for (const out of saved) await ensure1080pVideo(out, job);
       }
       await page.keyboard.press("Escape");
       await scrollToTop(page);
