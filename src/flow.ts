@@ -528,6 +528,12 @@ async function uploadAsset(page: Page, job: Job, file: string, label: string): P
   const chooser = page.waitForEvent("filechooser", { timeout: 10_000 });
   await page.getByRole("menuitem", { name: "Upload", exact: true }).click();
   await (await chooser).setFiles(staged);
+  // First upload on a Google account shows a one-time "Rights to use this image" confirmation modal ("I agree").
+  const agree = page.getByRole("dialog").getByRole("button", { name: /^I agree$/i }).first();
+  if (await agree.waitFor({ state: "visible", timeout: 2500 }).then(() => true, () => false)) {
+    await agree.click();
+    await pause(page, 600);
+  }
   await waitForUpload(page, name, 90_000);
   return name;
 }
