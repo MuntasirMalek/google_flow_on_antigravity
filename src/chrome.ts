@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -68,6 +68,17 @@ export function chromeExecutable(): string {
 async function launchChrome(): Promise<void> {
   const chromePath = chromeExecutable();
   mkdirSync(PROFILE_DIR, { recursive: true });
+  // Ensure the dedicated profile never pops up a native "Save As" dialog (e.g. Brave defaults on macOS).
+  const prefsFile = join(PROFILE_DIR, "Default", "Preferences");
+  if (existsSync(prefsFile)) {
+    try {
+      const prefs = JSON.parse(readFileSync(prefsFile, "utf8")) as Record<string, Record<string, unknown>>;
+      const dlDir = join(HOME_DIR, "downloads");
+      mkdirSync(dlDir, { recursive: true });
+      prefs.download = { ...(prefs.download ?? {}), prompt_for_download: false, default_directory: dlDir, directory_upgrade: true };
+      writeFileSync(prefsFile, JSON.stringify(prefs), "utf8");
+    } catch {}
+  }
   const child = spawn(
     chromePath,
     [
