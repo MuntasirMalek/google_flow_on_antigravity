@@ -2,7 +2,7 @@ import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, 
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { Locator, Page } from "playwright-core";
-import { HOME_DIR, OUTPUT_ROOT, getFlowPage, inEnglish } from "./chrome.js";
+import { CAST_DIR, HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
 
@@ -1784,7 +1784,7 @@ async function leaveCharacterEditor(page: Page): Promise<void> {
 // download through the same watched folders as every other file.
 async function savePortrait(page: Page, name: string): Promise<string> {
   await useOwnDownloadDir(page);
-  const dir = join(OUTPUT_ROOT, "_cast");
+  const dir = CAST_DIR;
   mkdirSync(dir, { recursive: true });
   const picture = page.getByRole("img", { name: "Generated character image" }).first();
   const button = page.getByRole("button", { name: "Download image", exact: true });
@@ -2017,7 +2017,7 @@ export async function createCharacter(c: CharacterParams, job?: Job): Promise<{ 
   if (!c.image) {
     if (!c.describe) throw new Error("Pass either an image or a description for the character.");
     if (job) job.progress = "drawing the character";
-    const dir = join(OUTPUT_ROOT, "_cast");
+    const dir = CAST_DIR;
     const made = await runGeneration({
       ...(job ?? ({ id: "char", status: "running", files: [], attempts: 1, createdAt: "" } as unknown as Job)),
       files: [],

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
@@ -17,11 +17,12 @@ export const inEnglish = (url: string): string => {
 const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx)/;
 export const HOME_DIR = process.env.FLOW_MCP_HOME ?? join(homedir(), ".flow-mcp");
 export const PROFILE_DIR = join(HOME_DIR, "chrome-profile");
+export const CAST_DIR = join(HOME_DIR, "cast");
 function defaultOutputRoot(): string {
   if (process.env.FLOW_MCP_OUTPUT) return process.env.FLOW_MCP_OUTPUT;
-  const dl = join(homedir(), "Downloads", "Google-Flow");
+  const dl = join(homedir(), "Downloads");
   try {
-    mkdirSync(dl, { recursive: true });
+    accessSync(dl, constants.W_OK);
     return dl;
   } catch {
     return join(homedir(), "flow-mcp-out");

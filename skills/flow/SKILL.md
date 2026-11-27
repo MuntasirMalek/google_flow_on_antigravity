@@ -54,6 +54,6 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
    - When generating `360p` videos with `download_quality: "720p"`, note that Flow may charge +1 credit for the 720p upscale and leave `+1` credit headroom per clip in `max_credits` so the 720p download is not skipped.
 
 5. **Queue, wait, and report**
-   - Send all scenes in one `flow_generate` call with the confirmed settings. Outputs automatically download to `~/Downloads/Google-Flow/<project>/` (or `FLOW_MCP_OUTPUT`).
+   - Send all scenes in one `flow_generate` call with the confirmed settings. Outputs automatically download to `~/Downloads/<project>/` (or `FLOW_MCP_OUTPUT`).
    - Poll with `flow_wait` until `finished: true`.
    - Report every downloaded file with clickable `file://` links, actual credits used, and any retryable failures (`flow_retry`).

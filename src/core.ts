@@ -773,7 +773,13 @@ export class LocalCore implements Core {
       .filter((d) => d.isDirectory())
       .map((d) => {
         const dir = join(OUTPUT_ROOT, d.name);
-        const files = readdirSync(dir)
+        let entries: string[] = [];
+        try {
+          entries = readdirSync(dir);
+        } catch {
+          return { name: d.name, dir, files: [], mtime: 0 };
+        }
+        const files = entries
           .filter((f) => media.test(f) && !f.endsWith("-lastframe.jpg"))
           .map((f) => ({ name: f, path: join(dir, f), kind: /\.(mp4|webm|mov)$/i.test(f) ? "video" : /\.(m4a|mp3|wav|aiff?)$/i.test(f) ? "audio" : "image", mtime: statSync(join(dir, f)).mtimeMs }))
           .sort((a, b) => a.name.localeCompare(b.name));
