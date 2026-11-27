@@ -672,7 +672,7 @@ async function scrollToTile(page: Page, mediaId: string, fallbackTitle?: string)
   // Walk the virtualised grid from top to bottom until the tile mounts.
   await scrollToTop(page);
   await pause(page, 600);
-  for (let step = 0; step < 60; step++) {
+  for (let step = 0; step < 120; step++) {
     const hit = await findNow();
     if (hit) return hit;
     const moved = await page
@@ -1701,7 +1701,6 @@ export async function runParallelGenerations(
     }
 
     // 1. Highest priority: keep Flow's parallel render slots full up to effectiveMax before spending time downloading.
-    let hitCapacity = false;
     while (activeRenderSlots() < effectiveMax && pending.length) {
       const job = pending.shift()!;
       if (job.status !== "queued") continue;
@@ -1717,7 +1716,6 @@ export async function runParallelGenerations(
           job.progress = "waiting for Flow slot";
           pending.unshift(job);
           settingsCache.key = "";
-          hitCapacity = true;
           capacityStreak++;
           const currentActive = activeRenderSlots();
           // Cap to Flow's actual concurrent capacity when >=2 are running; avoid permanently dropping to 1 on one hiccup.
@@ -1755,7 +1753,7 @@ export async function runParallelGenerations(
     if (!inFlight.length) continue;
 
     // 2. Poll the grid for finished tiles, live progress, and errors.
-    if (readyTiles.length === 0) await pause(page, 2000);
+    await pause(page, 2000);
     await scrollToTop(page);
 
     const progressList = await page
@@ -1770,8 +1768,8 @@ export async function runParallelGenerations(
       .catch(() => [] as string[]);
     const activeCount = activeRenderSlots();
     const progText = progressList.length
-      ? `rendering (${activeCount} active: ${progressList.join(", ")})`
-      : `rendering (${activeCount} active, ${readyTiles.length} ready to download)`;
+      ? `generating (${activeCount} active: ${progressList.join(", ")}; ${readyTiles.length} ready, ${pending.length} queued)`
+      : `generating (${activeCount} active; ${readyTiles.length} ready, ${pending.length} queued)`;
     for (const slot of inFlight) slot.job.progress = progText;
 
     // Scroll deeper into the virtualised grid when nothing new is visible at y=0 (e.g. tiles #7+ below the fold).
@@ -1799,99 +1797,7 @@ export async function runParallelGenerations(
       readyTiles.push(id);
     }
 
-    // If newly finished tiles just freed Flow render slots and more scenes are queued, refill Flow IMMEDIATELY
-    // before blocking for 20-35s on an upscale download so Flow renders continuously in parallel.
-    if (!hitCapacity && pending.length > 0 && activeRenderSlots() < effectiveMax) {
-      continue;
-    }
-
-    // 3. Pipeline AT MOST ONE finished tile download per iteration while Flow renders other scenes in parallel.
-    // After that single download finishes, loop back to Step 1/2 to immediately refill any freed render slots.
-    if (readyTiles.length > 0 && inFlight.length > 0) {
-      const downloadPhaseStart = Date.now();
-      const id = readyTiles.shift()!;
-      if (page.isClosed()) {
-        page = await getFlowPage();
-        await ensureProjectGrid(page);
-        settingsCache.key = "";
-      }
-
-      const located = (await scrollToTile(page, id)) ?? mediaTile(page, id);
-      const tileKind = await located
-        .evaluate((el) => (el.querySelector("flow-video-tile") ? "video" : el.querySelector("flow-image-tile") ? "image" : ""))
-        .catch(() => "");
-      const candidates = tileKind ? inFlight.filter((s) => s.kind === tileKind) : inFlight;
-      const pool = candidates.length ? candidates : inFlight;
-
-      let chosen = pool[0];
-      const allSamePrompt = pool.every((s) => s.job.params.prompt === pool[0].job.params.prompt);
-      if (pool.length > 1 && !allSamePrompt) {
-        const storedPrompt = await readTilePrompt(page, located);
-        // Reuse prompt may modify Flow's composer settings, so re-verify on the next submission.
-        settingsCache.key = "";
-        const idx = matchParallelTile(
-          storedPrompt,
-          pool.map((s) => s.job.params.prompt),
-        );
-        if (idx >= 0) chosen = pool[idx];
-      }
-
-      const job = chosen.job;
-      const s = job.params;
-      mkdirSync(s.output_dir, { recursive: true });
-      const offset = s.variant_offset ?? 0;
-      const variantNum = offset + chosen.receivedCount + 1;
-      const multi = (s.total_quantity ?? chosen.expectedVariants) > 1 || offset > 0;
-      const label = multi ? `${s.file_stem}-v${variantNum}` : s.file_stem;
-      const newTitle = `${basename(s.output_dir)}-${label}`;
-      job.progress = "downloading";
-      try {
-        const tileForRename = (await scrollToTile(page, id)) ?? mediaTile(page, id);
-        const renamed = await renameTile(page, tileForRename, newTitle).catch(() => false);
-        if (renamed) {
-          knownIds.add(`title:${newTitle}`);
-          job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
-        }
-        await pause(page, 400);
-        const stem = join(s.output_dir, label);
-        const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-        const downloaded = await downloadMedia(
-          page,
-          handle,
-          stem,
-          s.download_quality,
-          job,
-          multi ? variantNum : undefined,
-          renamed ? newTitle : undefined,
-        );
-        job.files.push(...downloaded);
-        chosen.receivedCount += Math.max(1, downloaded.length);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        chosen.tileErrors.push(`${label}: ${msg}`);
-        job.note = [job.note, `failed ${label}: ${msg}`].filter(Boolean).join(" · ");
-        // Count this tile slot as consumed so sibling variants (e.g. v8 after v7) still finish cleanly.
-        chosen.receivedCount += 1;
-      }
-      if (chosen.receivedCount >= chosen.expectedVariants) {
-        if (chosen.tileErrors.length && job.files.length === 0) {
-          job.status = "failed";
-          job.error = chosen.tileErrors.join("; ");
-        } else {
-          job.status = "done";
-          job.error = undefined;
-        }
-        job.progress = undefined;
-        job.finishedAt = new Date().toISOString();
-        inFlight.splice(inFlight.indexOf(chosen), 1);
-      }
-      // Credit download/upscale duration back to remaining in-flight deadlines so peer tiles never falsely time out.
-      const dlElapsed = Date.now() - downloadPhaseStart;
-      for (const slot of inFlight) slot.deadline += dlElapsed;
-      await pause(page, 300);
-    }
-
-    // 4. Handle any failed tiles (flow-error-tile) above known tiles.
+    // 3. Handle any failed tiles (flow-error-tile) right away during generation so retries run before downloading.
     const errors = await newErrorTiles(page, knownIds);
     if (errors > handledErrors && inFlight.length) {
       const reason = await errorReason(page);
@@ -1940,9 +1846,107 @@ export async function runParallelGenerations(
       handledErrors = errors;
     }
 
+    // Phase A -> Phase B gate: finish generating ALL queued scenes in parallel first (zero download stalls while
+    // scenes are still queued or actively rendering). Only start downloading once every scene has been submitted and
+    // all active Flow renders are done (or Flow shows 0 busy tiles for 2 polls, e.g. duplicate auto-titled videos).
+    const allGenerated =
+      pending.length === 0 &&
+      (activeRenderSlots() === 0 || (readyTiles.length > 0 && progressList.length === 0 && emptyPolls >= 2));
+
+    // 4. Phase B: Download all finished tiles cleanly (newest-at-top first to minimize grid scrolling).
+    if (allGenerated && readyTiles.length > 0 && inFlight.length > 0) {
+      const downloadPhaseStart = Date.now();
+      const totalToDownload = readyTiles.length;
+      let downloadedSoFar = 0;
+      while (readyTiles.length > 0 && inFlight.length > 0) {
+        const id = readyTiles.pop()!;
+        downloadedSoFar++;
+        if (page.isClosed()) {
+          page = await getFlowPage();
+          await ensureProjectGrid(page);
+          settingsCache.key = "";
+        }
+
+        const located = (await scrollToTile(page, id)) ?? mediaTile(page, id);
+        const tileKind = await located
+          .evaluate((el) => (el.querySelector("flow-video-tile") ? "video" : el.querySelector("flow-image-tile") ? "image" : ""))
+          .catch(() => "");
+        const candidates = tileKind ? inFlight.filter((s) => s.kind === tileKind) : inFlight;
+        const pool = candidates.length ? candidates : inFlight;
+
+        let chosen = pool[0];
+        const allSamePrompt = pool.every((s) => s.job.params.prompt === pool[0].job.params.prompt);
+        if (pool.length > 1 && !allSamePrompt) {
+          const storedPrompt = await readTilePrompt(page, located);
+          settingsCache.key = "";
+          const idx = matchParallelTile(
+            storedPrompt,
+            pool.map((s) => s.job.params.prompt),
+          );
+          if (idx >= 0) chosen = pool[idx];
+        }
+
+        const job = chosen.job;
+        const s = job.params;
+        mkdirSync(s.output_dir, { recursive: true });
+        const offset = s.variant_offset ?? 0;
+        const variantNum = offset + chosen.receivedCount + 1;
+        const multi = (s.total_quantity ?? chosen.expectedVariants) > 1 || offset > 0;
+        const label = multi ? `${s.file_stem}-v${variantNum}` : s.file_stem;
+        const newTitle = `${basename(s.output_dir)}-${label}`;
+        job.progress = `downloading (${downloadedSoFar}/${totalToDownload})`;
+        try {
+          const tileForRename = (await scrollToTile(page, id)) ?? mediaTile(page, id);
+          const renamed = await renameTile(page, tileForRename, newTitle).catch(() => false);
+          if (renamed) {
+            knownIds.add(`title:${newTitle}`);
+            job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
+          }
+          await pause(page, 400);
+          const stem = join(s.output_dir, label);
+          const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
+          const downloaded = await downloadMedia(
+            page,
+            handle,
+            stem,
+            s.download_quality,
+            job,
+            multi ? variantNum : undefined,
+            renamed ? newTitle : undefined,
+          );
+          job.files.push(...downloaded);
+          chosen.receivedCount += Math.max(1, downloaded.length);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          chosen.tileErrors.push(`${label}: ${msg}`);
+          job.note = [job.note, `failed ${label}: ${msg}`].filter(Boolean).join(" · ");
+          // Count this tile slot as consumed so sibling variants (e.g. v8 after v7) still finish cleanly.
+          chosen.receivedCount += 1;
+        }
+        if (chosen.receivedCount >= chosen.expectedVariants) {
+          if (chosen.tileErrors.length && job.files.length === 0) {
+            job.status = "failed";
+            job.error = chosen.tileErrors.join("; ");
+          } else {
+            job.status = "done";
+            job.error = undefined;
+          }
+          job.progress = undefined;
+          job.finishedAt = new Date().toISOString();
+          inFlight.splice(inFlight.indexOf(chosen), 1);
+        }
+        await pause(page, 300);
+      }
+      // Credit download/upscale duration back to any remaining in-flight slots (e.g. duplicate-titled videos).
+      const dlElapsed = Date.now() - downloadPhaseStart;
+      for (const slot of inFlight) slot.deadline += dlElapsed;
+      emptyPolls = 0;
+      continue;
+    }
+
     // 5. Fail any individual slot that exceeded its render timeout without aborting healthy peers.
-    // Skip expiring while tiles were just discovered or are waiting in readyTiles to be harvested.
-    if (settled.length === 0 && readyTiles.length === 0) {
+    // Skip expiring while scenes are still being submitted, just discovered, or waiting in readyTiles.
+    if (pending.length === 0 && settled.length === 0 && readyTiles.length === 0) {
       const now = Date.now();
       for (let i = inFlight.length - 1; i >= 0; i--) {
         if (now > inFlight[i].deadline) {
