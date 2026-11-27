@@ -1567,6 +1567,7 @@ export async function runParallelGenerations(
     }
 
     // 3. Match each newly finished tile back to its exact in-flight job, rename, and download.
+    const downloadPhaseStart = Date.now();
     for (const id of settled) {
       if (!inFlight.length) break;
       knownIds.add(id);
@@ -1626,6 +1627,12 @@ export async function runParallelGenerations(
       }
       await pause(page, 800);
     }
+    // Time spent sequentially downloading peer tiles (especially 2K/1080p upscales) is not render wait time for
+    // other slots still queued to be harvested from the grid — credit that duration back to remaining deadlines.
+    if (settled.length > 0 && inFlight.length > 0) {
+      const dlElapsed = Date.now() - downloadPhaseStart;
+      for (const slot of inFlight) slot.deadline += dlElapsed;
+    }
 
     // 4. Handle any failed tiles (flow-error-tile) above known tiles.
     const errors = await newErrorTiles(page, knownIds);
@@ -1676,15 +1683,18 @@ export async function runParallelGenerations(
     }
 
     // 5. Fail any individual slot that exceeded its render timeout without aborting healthy peers.
-    const now = Date.now();
-    for (let i = inFlight.length - 1; i >= 0; i--) {
-      if (now > inFlight[i].deadline) {
-        const slot = inFlight.splice(i, 1)[0];
-        const secs = Math.round((slot.kind === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS) / 1000);
-        slot.job.status = "failed";
-        slot.job.progress = undefined;
-        slot.job.error = `Timed out after ${secs}s waiting for Flow to finish.`;
-        slot.job.finishedAt = new Date().toISOString();
+    // Skip expiring on iterations where we just harvested/downloaded tiles so finished peers get polled next turn.
+    if (settled.length === 0) {
+      const now = Date.now();
+      for (let i = inFlight.length - 1; i >= 0; i--) {
+        if (now > inFlight[i].deadline) {
+          const slot = inFlight.splice(i, 1)[0];
+          const secs = Math.round((slot.kind === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS) / 1000);
+          slot.job.status = "failed";
+          slot.job.progress = undefined;
+          slot.job.error = `Timed out after ${secs}s waiting for Flow to finish.`;
+          slot.job.finishedAt = new Date().toISOString();
+        }
       }
     }
   }
