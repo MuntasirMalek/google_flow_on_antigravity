@@ -38,36 +38,49 @@ Antigravity (/flow) ──stdio──> flow-mcp ──CDP (port 9333)──> Ded
 
 ## Install & Connect to Antigravity
 
-### 1. Clone and build
-> **macOS note:** Put the folder directly in your home directory (`~/google_flow_on_antigravity` or `~/flow-mcp`), **not** inside `~/Desktop`, `~/Documents`, or `~/Downloads`, to avoid macOS `EPERM` permission errors.
+### 1. Install prerequisites & clone
+> **macOS note:** Put the folder directly in your home directory (`~/google_flow_on_antigravity`), **not** inside `~/Desktop`, `~/Documents`, or `~/Downloads`, to avoid macOS `EPERM` permission errors.
 
+On a new Mac (with Homebrew):
+```bash
+brew install node ffmpeg
+```
+
+Clone and build:
 ```bash
 cd ~
 git clone https://github.com/MuntasirMalek/google_flow_on_antigravity.git
 cd google_flow_on_antigravity
-npm install
-npm run build
+npm install && npm run build
 ```
 
-### 2. Sign in once (persistent, zero popups)
+### 2. Install `/flow` and `/flow-reset` slash commands in Antigravity
 ```bash
-npm run login
-# Or to use Brave explicitly on macOS:
+mkdir -p ~/.gemini/config/skills
+cp -R skills/flow skills/flow-reset ~/.gemini/config/skills/
+```
+
+### 3. Sign in once (persistent, zero popups)
+```bash
+# Brave on macOS:
 FLOW_MCP_CHROME="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" npm run login
+
+# Or Google Chrome:
+npm run login
 ```
 Sign into your Google account in the dedicated window that opens and open (or create) a Flow project. Your session is saved permanently in `~/.flow-mcp/chrome-profile` — even if you close the window or reboot, you stay signed in.
 
-### 3. Add the MCP server to Antigravity
-Edit `~/.gemini/config/mcp_config.json` and add the `flow` entry (use the full path from `which node` on macOS if Node is installed via Homebrew or MacPorts):
+### 4. Add the MCP server to Antigravity
+Run `which node` in Terminal and put that exact path as `"command"` in `~/.gemini/config/mcp_config.json` (usually `/opt/homebrew/bin/node` on Apple Silicon Macs, or `/opt/local/bin/node` with MacPorts):
 
 ```json
 {
   "mcpServers": {
     "flow": {
-      "command": "/opt/local/bin/node",
+      "command": "/opt/homebrew/bin/node",
       "args": ["/Users/YOUR_USERNAME/google_flow_on_antigravity/dist/index.js"],
       "env": {
-        "PATH": "/opt/local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": "/opt/homebrew/bin:/opt/local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         "FLOW_MCP_CHROME": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
       }
     }
@@ -76,12 +89,9 @@ Edit `~/.gemini/config/mcp_config.json` and add the `flow` entry (use the full p
 ```
 *(Omit `FLOW_MCP_CHROME` if you want Google Chrome.)*
 
-### 4. Install the `/flow` and `/flow-reset` slash commands in Antigravity
-```bash
-mkdir -p ~/.gemini/config/skills
-cp -R skills/flow skills/flow-reset ~/.gemini/config/skills/
-```
-Refresh MCP servers in Antigravity (**Skills & Customizations → MCP Servers**) or restart Antigravity.
+Refresh MCP servers in Antigravity (**Skills & Customizations → MCP Servers**) or restart Antigravity — you're ready to type `/flow ...` in chat. Outputs download straight into `~/Downloads/<project>/`.
+
+> **Background tip (macOS):** Keep the Flow browser window behind your active apps (or on another Desktop Space) while working in Brave or other apps — avoid yellow-minimizing (`Cmd+M`) during active generation so macOS keeps rendering frames smoothly in the background.
 
 ---
 
