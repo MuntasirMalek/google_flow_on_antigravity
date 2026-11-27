@@ -12,7 +12,7 @@ Antigravity (/flow) ──stdio──> flow-mcp ──CDP (port 9333)──> Ded
 
 ## Key Features & Enhancements
 
-- **`/flow` Antigravity Skill included ([skills/flow/SKILL.md](skills/flow/SKILL.md)):** Type `/flow ...` (or just mention `flow`) in Antigravity chat to generate videos/images, set global rules, or check credits.
+- **`/flow` & `/flow-reset` Antigravity Skills included ([skills/flow/SKILL.md](skills/flow/SKILL.md), [skills/flow-reset/SKILL.md](skills/flow-reset/SKILL.md)):** Type `/flow ...` (or just mention `flow`) in Antigravity chat to generate videos/images, set global rules, or check credits — and `/flow-reset` anytime to clear saved global defaults.
 - **Parallel Normal-Composer Generation (automatic up to 4, Flow Agent OFF):** Automatically overlaps up to 4 independent video or image submissions in Flow simultaneously with human-paced staggers (`FLOW_MCP_SUBMIT_STAGGER_S`), matching finished out-of-order tiles back to exact scenes via `Reuse prompt`, while keeping `chain_previous` / `reference_previous` strictly serial (override `concurrency: 1–4` anytime via `flow_defaults` or per call).
 - **Unlimited `quantity` (`1–100` takes per prompt):** Flow's UI caps a single submission at `x4`. Asking for `quantity: 10` (images or videos) automatically splits into parallel `x4 + x4 + x2` batches and numbers outputs cleanly as `scene-01-v1` … `scene-01-v10`.
 - **Global Rules (`flow_defaults`) + Ask-Only-What's-Missing Enforcement:** Save any subset of favorite rules once in `~/.flow-mcp/defaults.json` (e.g., *"always use Omni 1.1 Flash, gen 360p, download 720p, 3 parallel"*). `flow_generate` merges your global rules with explicit per-call overrides and **refuses to guess** any unset required setting — so the assistant asks **only** for settings you haven't locked globally.
@@ -76,26 +76,27 @@ Edit `~/.gemini/config/mcp_config.json` and add the `flow` entry (use the full p
 ```
 *(Omit `FLOW_MCP_CHROME` if you want Google Chrome.)*
 
-### 4. Install the `/flow` slash command in Antigravity
+### 4. Install the `/flow` and `/flow-reset` slash commands in Antigravity
 ```bash
-mkdir -p ~/.gemini/config/skills/flow
-cp skills/flow/SKILL.md ~/.gemini/config/skills/flow/SKILL.md
+mkdir -p ~/.gemini/config/skills
+cp -R skills/flow skills/flow-reset ~/.gemini/config/skills/
 ```
 Refresh MCP servers in Antigravity (**Skills & Customizations → MCP Servers**) or restart Antigravity.
 
 ---
 
-## Using `/flow` in Antigravity Chat
+## Using `/flow` & `/flow-reset` in Antigravity Chat
 
 - **Set global rules once (optional):**
-  > `/flow always use Omni 1.1 Flash, gen 360p, download 720p, 16:9, and 3 parallel for videos`
-- **Generate videos or images (asks ONLY what isn't saved globally):**
+  > `/flow always use Omni 1.1 Flash, gen 360p, download 720p, 16:9 for videos`
+- **Generate videos or images (asks ONLY what isn't saved globally; saves straight to `~/Downloads/<project>/`):**
   > `/flow make 10 cyberpunk cat images`
   > `/flow create 3 documentary clips about deepfakes`
 - **Override for a single run without changing global rules:**
   > `/flow make 2 videos in 720p with Omni 1.2 Flash, 8s`
-- **Clear a global rule anytime:**
-  > `/flow clear my global video resolution default`
+- **Reset global rules anytime:**
+  > `/flow-reset` *(clears all saved global rules)*
+  > `/flow-reset video` or `/flow-reset image download_quality` *(clears a specific scope or field)*
 
 ---
 

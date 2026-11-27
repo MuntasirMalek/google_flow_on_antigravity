@@ -19,7 +19,7 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
    - If `flow.hint` says the user is signed out, tell them to run `npm run login` in their `flow-mcp` folder and stop. If signed in with no project open, offer to open or create one with `flow_new_project`.
 
 2. **Handle global rule requests (`flow_defaults`)**
-   - When the user says things like *"always use Omni 1.1 Flash"*, *"set global download quality to 720p"*, *"always generate 3 in parallel"*, or *"clear my global video defaults"*, call `flow_defaults`:
+   - When the user says things like *"always use Omni 1.1 Flash"*, *"set global download quality to 720p"*, *"always generate 3 in parallel"*, or *"clear my global video defaults"* (or runs `/flow-reset`), call `flow_defaults`:
      - `action: "set"` with `concurrency`, `video: { ... }`, and/or `image: { ... }`
      - `action: "get"` to show current saved rules
      - `action: "clear"` with optional `scope` (`"all" | "video" | "image" | "concurrency"`) and `keys`
