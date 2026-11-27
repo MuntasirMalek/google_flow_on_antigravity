@@ -599,7 +599,7 @@ export class LocalCore implements Core {
       throw new Error(
         `Missing required settings (not specified and not saved in global defaults):\n- ${missingErrors.join("\n- ")}\n` +
           (applied.length ? `Applied global defaults: ${applied.join(", ")}.\n` : "No global defaults saved yet.\n") +
-          `Ask the user for ONLY the missing settings above PLUS one final question in the same prompt asking whether to save those chosen settings as global defaults or use them for this run only. If they choose global, call flow_defaults(action="set") first and then flow_generate immediately. Nothing was generated.`,
+          `Ask the user for ONLY the missing settings above PLUS one final multi-select question in the same prompt letting them choose which specific asked settings (none, all, or individual fields) to save as global defaults. If any fields are selected, call flow_defaults(action="set") with ONLY those fields first, then call flow_generate immediately. Nothing was generated.`,
       );
     }
     const invalidChainQty = resolvedList.find((x) => x.sc.chain_previous && x.res.ok && x.res.settings.quantity > 4);

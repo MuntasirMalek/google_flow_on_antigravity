@@ -101,7 +101,7 @@ server.registerTool(
   {
     title: "Global Flow generation defaults",
     description:
-      "Get, set, or clear the user's persistent global rules (~/.flow-mcp/defaults.json) for video and image generation (model, duration, resolution, download_quality, aspect_ratio, quantity, max_credits, concurrency). Any field saved globally is applied automatically on future flow_generate calls, while any field NOT saved globally is enforced and must be asked from the user — together with one final question in the same prompt asking whether to save the chosen settings as global defaults or use them for this run only.",
+      "Get, set, or clear the user's persistent global rules (~/.flow-mcp/defaults.json) for video and image generation (model, duration, resolution, download_quality, aspect_ratio, quantity, max_credits, concurrency). Any field saved globally is applied automatically on future flow_generate calls, while any field NOT saved globally is enforced and must be asked from the user — together with one final multi-select question in the same prompt letting them pick none, all, or specific individual settings to save globally.",
     inputSchema: shapes.defaults,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -113,7 +113,7 @@ server.registerTool(
   {
     title: "Queue Flow generations",
     description:
-      "Queue clips or images in the open Flow project using Flow's normal composer (Flow Agent off). Automatically merges saved global rules (from flow_defaults) with explicit args, and REFUSES the call if any required setting is still unset — ask the user ONLY for settings not saved globally, PLUS one final question in that same prompt asking whether to save those chosen settings as global defaults or use them for this run only (call flow_defaults first if they choose global). Supports unlimited `quantity` (1-100): values above Flow's x4 UI limit are automatically split into parallel x4 batches (e.g. quantity=10 -> 4+4+2) numbered -v1..-v10. Set `concurrency` (2-4) to overlap independent non-chained scenes while checking Flow's upfront max_credits quote on every submission. Returns job ids immediately; use flow_wait for results.",
+      "Queue clips or images in the open Flow project using Flow's normal composer (Flow Agent off). Automatically merges saved global rules (from flow_defaults) with explicit args, and REFUSES the call if any required setting is still unset — ask the user ONLY for settings not saved globally, PLUS one final multi-select question in that same prompt letting them pick none, all, or specific individual settings to save as global defaults (call flow_defaults first with ONLY the selected fields). Supports unlimited `quantity` (1-100): values above Flow's x4 UI limit are automatically split into parallel x4 batches (e.g. quantity=10 -> 4+4+2) numbered -v1..-v10. Set `concurrency` (2-4) to overlap independent non-chained scenes while checking Flow's upfront max_credits quote on every submission. Returns job ids immediately; use flow_wait for results.",
     inputSchema: shapes.generate,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },

@@ -45,17 +45,26 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
    - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** (and for videos, always include **length** and **variation/quantity**) unless saved in global defaults. Keep it short; no filler questions. In multiple-choice prompts (`ask_question`), always put these first as `(Recommended)`:
      - **Images:** Model `Nano Banana 2.1 (latest)`, Aspect `16:9`, Download quality **`Upscaled (2K)`**, Quantity **`1`** (when unset).
      - **Videos:** Model **`Omni 1.2 Flash`**, Clip length **`10s`**, Generate quality **`360p`**, Download quality **`720p`**, Variation/quantity **`1`**, Aspect **`16:9`**.
-   - **ALWAYS include one final question in that SAME prompt (`ask_question` / settings prompt) asking whether to save the chosen settings globally or use them only for this run:**
-     - Question: *"Save these settings as global defaults for future `/flow` runs?"*
-     - Options:
-       1. `(Recommended) No — use for this run only`
-       2. `Yes — save as global defaults (skip asking next time; /flow-reset to clear)`
+   - **ALWAYS include one final question in that SAME prompt (`ask_question` / settings prompt) letting the user pick which (if any) of the asked settings to save as global defaults:**
+     - **When 2 or more settings were asked**, make this final question **multi-select (`is_multi_select: true`)** so the user can save **only specific settings** (e.g. just `Model`, or `Model` + `Download quality`) without locking the rest:
+       - Question: *"Which of these settings should I save as global defaults for future `/flow` runs?"*
+       - Options:
+         1. `(Recommended) None — use for this run only`
+         2. `All of these settings`
+         3. One option per setting actually asked in this prompt (e.g. `Model`, `Aspect ratio`, `Download quality`, `Clip length (duration)`, `Generate quality (resolution)`, `Variation / quantity` — list ONLY the fields asked above).
+     - **When only 1 setting was asked**, use single-select (`is_multi_select: false`):
+       - Question: *"Save this `<setting>` as a global default for future `/flow` runs?"*
+       - Options:
+         1. `(Recommended) No — use for this run only`
+         2. `Yes — save as global default (reset anytime with /flow-reset)`
      - Never omit this question whenever asking for one or more missing settings, and **never** push it into a separate follow-up round.
 
-4. **Save global defaults (if requested) & execute immediately — NEVER ask a second confirmation round**
+4. **Save chosen global defaults (if any) & execute immediately — NEVER ask a second confirmation round**
    - Once the user answers their settings once:
-     - If they chose **Yes — save as global defaults** (or specified a subset via `Other`), immediately call `flow_defaults({ action: "set", ... })` for the settings they were asked and selected (under `video` or `image`). Do **not** lock a one-off `quantity` that was only stated in the user's original prompt (e.g. *"make 9 cyberpunk dog images"*) unless `quantity` was one of the asked settings or they explicitly asked to save it globally.
-     - If they chose **No — use for this run only**, leave `~/.flow-mcp/defaults.json` unchanged.
+     - If they picked **`All of these settings`** (or `Yes` on a 1-setting prompt), call `flow_defaults({ action: "set", ... })` for all settings asked in this prompt (under `video` or `image`).
+     - If they checked **specific setting(s)** (e.g. only `Model`, or `Model` + `Download quality`, or named fields via `Other`), call `flow_defaults({ action: "set", ... })` with **ONLY those selected fields** — leave unchecked fields unsaved so `/flow` continues asking for them on future runs.
+     - If they picked only **`None — use for this run only`** (or `No` / skipped), leave `~/.flow-mcp/defaults.json` unchanged.
+     - Never save a one-off `quantity` that was only stated in the user's original prompt (e.g. *"make 10 thumbnails"*) unless `quantity` was asked and selected (or explicitly requested to be saved globally).
      - Queue the generation with `flow_generate` right away in the same turn — do **NOT** ask a second round of follow-up questions.
    - Images cost **0 credits** (both 1K and 2K download).
    - If the user picks `360p` generate + `1080p` download on video, execute immediately: Flow downloads its `720p Upscaled` and `flow-mcp` automatically finishes the clip to `1080p` (`1920×1080` / `1080×1920`) locally via FFmpeg at 0 extra credits (and pass `size: "1920x1080"` or `"1080x1920"` to `flow_assemble` when stitching).
