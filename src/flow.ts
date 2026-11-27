@@ -1,7 +1,7 @@
 import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
-import type { Locator, Page } from "playwright-core";
+import type { CDPSession, Locator, Page } from "playwright-core";
 import { CAST_DIR, HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
@@ -717,21 +717,30 @@ function tileByIdOrTitle(page: Page, id: string, title?: string): TileResolver {
 
 const DOWNLOAD_DIR = join(HOME_DIR, "downloads");
 let downloadsReady = false;
+const downloadSessions = new WeakMap<Page, CDPSession>();
 
 // Playwright keeps a download in a per-connection temp file it can delete from under us; pointing Chrome itself at a
 // directory we own makes the bytes ours the moment they land.
 async function useOwnDownloadDir(page: Page): Promise<void> {
-  // Setting this once per process was not enough: another CDP client attaching resets it browser-wide, and Chrome
-  // quietly goes back to ~/Downloads. Re-assert before every download, and always detach the CDP session afterwards
-  // so large multi-image/video batches never leak dozens of open DevTools sessions.
+  // Re-assert before every download using ONE cached CDP session per page (WeakMap). Never leak a new session per
+  // download, and never detach immediately — detaching cancels Browser.setDownloadBehavior in Chromium/Brave and
+  // causes downloads to stall as hidden .com.brave.Browser.* temp files in ~/Downloads.
   mkdirSync(DOWNLOAD_DIR, { recursive: true });
-  const cdp = await page.context().newCDPSession(page);
-  try {
-    await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: DOWNLOAD_DIR, eventsEnabled: true }).catch(() => {});
-    downloadsReady = true;
-  } finally {
-    await cdp.detach().catch(() => {});
+  const params = { behavior: "allowAndName" as const, downloadPath: DOWNLOAD_DIR, eventsEnabled: true };
+  let cdp = downloadSessions.get(page);
+  if (cdp) {
+    try {
+      await cdp.send("Browser.setDownloadBehavior", params);
+      downloadsReady = true;
+      return;
+    } catch {
+      downloadSessions.delete(page);
+    }
   }
+  cdp = await page.context().newCDPSession(page);
+  downloadSessions.set(page, cdp);
+  await cdp.send("Browser.setDownloadBehavior", params).catch(() => {});
+  downloadsReady = true;
 }
 
 // Chrome's own Downloads folder, where files land whenever the override above has been reset out from under us.
