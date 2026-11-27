@@ -33,16 +33,16 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
      - **Video scenes (`type: "video"`):**
        - `model` (`Omni 1.2 Flash`, `Omni 1.1 Flash`, `Veo 3.1 - Lite`)
        - `duration` (`3`–`15` s on Omni 1.2; `4`/`6`/`8`/`10` s on Omni 1.1; fixed `8` s on Veo 3.1)
-       - `resolution` (`360p` or `720p`, for Omni models)
-       - `download_quality` (`original`, `720p`, `1080p`, or `upscaled`)
+       - `resolution` (`360p` **(Recommended)** or `720p`, for Omni models)
+       - `download_quality` (`original`, `720p`, `1080p`, or `upscaled` — put `360p` / `original` as **(Recommended)** for cheap drafts)
        - `aspect_ratio` (`16:9` or `9:16`)
        - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
      - **Image scenes (`type: "image"`):**
        - `model` (`latest` / `Nano Banana 2.1`, `Nano Banana Pro`, `Nano Banana 2 Lite`)
        - `aspect_ratio` (`16:9`, `9:16`, `1:1`, `4:3`, `3:4`)
-       - `download_quality` (`original` 1K or `upscaled` 2K)
+       - `download_quality` (`upscaled` 2K **(Recommended)** or `original` 1K)
        - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
-   - If any required setting above is still unset, ask ONLY those missing items (keep it short; do not add extra filler questions). Mention briefly that they can say *"make X default"* anytime to save any setting globally.
+   - If any required setting above is still unset, ask ONLY those missing items (keep it short; do not add extra filler questions). In multiple-choice prompts, put **2K Upscaled** as `(Recommended)` for images and **360p** as `(Recommended)` for videos. Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs.
 
 4. **Confirm credit spend before paid runs**
    - Images cost **0 credits**.
