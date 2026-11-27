@@ -41,14 +41,22 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
        - `model` (`latest` / `Nano Banana 2.1` **(Recommended)**, `Nano Banana Pro`, `Nano Banana 2 Lite`)
        - `aspect_ratio` (`16:9` **(Recommended)**, `9:16`, `1:1`, `4:3`, `3:4`)
        - `download_quality` (`upscaled` 2K **(Recommended)** or `original` 1K)
-       - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
-   - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** (and for videos, always include **length** and **variation/quantity**) unless saved in global defaults. Keep it short; no filler questions. In multiple-choice prompts, always put these first as `(Recommended)`:
-     - **Images:** Model `Nano Banana 2.1 (latest)`, Aspect `16:9`, Download quality **`Upscaled (2K)`**.
+       - `quantity` (`1` **(Recommended)**, `2`, `4`, or `1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
+   - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** (and for videos, always include **length** and **variation/quantity**) unless saved in global defaults. Keep it short; no filler questions. In multiple-choice prompts (`ask_question`), always put these first as `(Recommended)`:
+     - **Images:** Model `Nano Banana 2.1 (latest)`, Aspect `16:9`, Download quality **`Upscaled (2K)`**, Quantity **`1`** (when unset).
      - **Videos:** Model **`Omni 1.2 Flash`**, Clip length **`10s`**, Generate quality **`360p`**, Download quality **`720p`**, Variation/quantity **`1`**, Aspect **`16:9`**.
-   - Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs (or `/flow-reset` to clear saved rules).
+   - **ALWAYS include one final question in that SAME prompt (`ask_question` / settings prompt) asking whether to save the chosen settings globally or use them only for this run:**
+     - Question: *"Save these settings as global defaults for future `/flow` runs?"*
+     - Options:
+       1. `(Recommended) No — use for this run only`
+       2. `Yes — save as global defaults (skip asking next time; /flow-reset to clear)`
+     - Never omit this question whenever asking for one or more missing settings, and **never** push it into a separate follow-up round.
 
-4. **Execute immediately after the user answers — NEVER ask a second confirmation round**
-   - Once the user answers their settings once, queue the generation right away — do **NOT** ask a second round of follow-up questions.
+4. **Save global defaults (if requested) & execute immediately — NEVER ask a second confirmation round**
+   - Once the user answers their settings once:
+     - If they chose **Yes — save as global defaults** (or specified a subset via `Other`), immediately call `flow_defaults({ action: "set", ... })` for the settings they were asked and selected (under `video` or `image`). Do **not** lock a one-off `quantity` that was only stated in the user's original prompt (e.g. *"make 9 cyberpunk dog images"*) unless `quantity` was one of the asked settings or they explicitly asked to save it globally.
+     - If they chose **No — use for this run only**, leave `~/.flow-mcp/defaults.json` unchanged.
+     - Queue the generation with `flow_generate` right away in the same turn — do **NOT** ask a second round of follow-up questions.
    - Images cost **0 credits** (both 1K and 2K download).
    - If the user picks `360p` generate + `1080p` download on video, execute immediately: Flow downloads its `720p Upscaled` and `flow-mcp` automatically finishes the clip to `1080p` (`1920×1080` / `1080×1920`) locally via FFmpeg at 0 extra credits (and pass `size: "1920x1080"` or `"1080x1920"` to `flow_assemble` when stitching).
    - Set `max_credits` with headroom for Flow's paid `720p` upscale on `360p` clips (e.g. `25` for a 15s 360p clip = `20` gen + `5` upscale) so downloads are never skipped. Only stop early if the user's actual credit balance is genuinely too low to cover the requested clips.
