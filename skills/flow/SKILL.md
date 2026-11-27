@@ -34,7 +34,7 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
        - `model` (`Omni 1.2 Flash`, `Omni 1.1 Flash`, `Veo 3.1 - Lite`)
        - `duration` (`3`–`15` s on Omni 1.2; `4`/`6`/`8`/`10` s on Omni 1.1; fixed `8` s on Veo 3.1)
        - `resolution` (`360p` **(Recommended)** or `720p`, for Omni models)
-       - `download_quality` (`original`, `720p`, `1080p`, or `upscaled` — put `360p` / `original` as **(Recommended)** for cheap drafts)
+       - `download_quality` (`720p` **(Recommended)**, `original` matching gen resolution, `1080p`, or `upscaled`)
        - `aspect_ratio` (`16:9` or `9:16`)
        - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
      - **Image scenes (`type: "image"`):**
@@ -42,14 +42,18 @@ Use the `flow` MCP server to drive Google Flow in parallel through the normal co
        - `aspect_ratio` (`16:9`, `9:16`, `1:1`, `4:3`, `3:4`)
        - `download_quality` (`upscaled` 2K **(Recommended)** or `original` 1K)
        - `quantity` (`1`–`100` takes per prompt — quantities above 4 automatically split into parallel `x4` batches)
-   - If any required setting above is still unset, ask ONLY those missing items (keep it short; do not add extra filler questions). In multiple-choice prompts, put **2K Upscaled** as `(Recommended)` for images and **360p** as `(Recommended)` for videos. Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs.
+   - If any required setting above is still unset, ask ONLY those missing items — **always include the download quality option** unless it is saved in global defaults (keep it short; no filler questions). In multiple-choice prompts, put:
+     - **Images — Download quality:** **`(Recommended) Upscaled (2K)`** first, `Original (1K)` second.
+     - **Videos — Generation resolution:** **`(Recommended) 360p`** first, `720p` second.
+     - **Videos — Download quality:** **`(Recommended) 720p`** first, `Original (same as gen)`, `1080p`.
+   - Mention briefly that they can say *"save X as global rule"* anytime to skip asking for a setting in future runs.
 
 4. **Confirm credit spend before paid runs**
-   - Images cost **0 credits**.
+   - Images cost **0 credits** (both 1K and 2K download).
    - For videos, compute and state the expected total credits before queueing (e.g. Omni 1.2 Flash 360p = 1 cr/s up to 10 s, 720p = 3 cr/s up to 10 s; Omni 1.1 Flash 360p = 4/5/6/7 cr, 720p = 7/10/12/15 cr; Veo 3.1 Lite = 10 cr).
-   - Set `max_credits` per submission cleanly so `x4` split batches aren't falsely blocked while still capping overspend.
+   - When generating `360p` videos with `download_quality: "720p"`, note that Flow may charge +1 credit for the 720p upscale and leave `+1` credit headroom per clip in `max_credits` so the 720p download is not skipped.
 
 5. **Queue, wait, and report**
-   - Send all scenes in one `flow_generate` call with the confirmed settings.
+   - Send all scenes in one `flow_generate` call with the confirmed settings. Outputs automatically download to `~/Downloads/Google-Flow/<project>/` (or `FLOW_MCP_OUTPUT`).
    - Poll with `flow_wait` until `finished: true`.
-   - Report every saved file with clickable `file://` links, actual credits used, and any retryable failures (`flow_retry`).
+   - Report every downloaded file with clickable `file://` links, actual credits used, and any retryable failures (`flow_retry`).

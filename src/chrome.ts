@@ -17,6 +17,17 @@ export const inEnglish = (url: string): string => {
 const FLOW_HOSTS = /^https:\/\/(flow\.google\.com|labs\.google\/fx)/;
 export const HOME_DIR = process.env.FLOW_MCP_HOME ?? join(homedir(), ".flow-mcp");
 export const PROFILE_DIR = join(HOME_DIR, "chrome-profile");
+function defaultOutputRoot(): string {
+  if (process.env.FLOW_MCP_OUTPUT) return process.env.FLOW_MCP_OUTPUT;
+  const dl = join(homedir(), "Downloads", "Google-Flow");
+  try {
+    mkdirSync(dl, { recursive: true });
+    return dl;
+  } catch {
+    return join(homedir(), "flow-mcp-out");
+  }
+}
+export const OUTPUT_ROOT = defaultOutputRoot();
 export const CDP_PORT = Number(process.env.FLOW_MCP_CDP_PORT ?? 9333);
 const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
 
