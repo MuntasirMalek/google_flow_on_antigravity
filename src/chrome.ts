@@ -65,20 +65,35 @@ export function chromeExecutable(): string {
   return chromePath;
 }
 
-async function launchChrome(): Promise<void> {
+function patchProfileDownloadPrefs(): void {
+  // Ensure the dedicated profile never pops up a native "Save As" dialog or throttles/blocks
+  // automatic multi-file downloads ("Download multiple files") after 30+ consecutive Flow downloads.
+  const prefsFile = join(PROFILE_DIR, "Default", "Preferences");
+  if (!existsSync(prefsFile)) return;
+  try {
+    const prefs = JSON.parse(readFileSync(prefsFile, "utf8")) as Record<string, Record<string, unknown>>;
+    const dlDir = join(HOME_DIR, "downloads");
+    mkdirSync(dlDir, { recursive: true });
+    prefs.download = { ...(prefs.download ?? {}), prompt_for_download: false, default_directory: dlDir, directory_upgrade: true };
+    const profile = (prefs.profile ?? {}) as Record<string, unknown>;
+    const defaults = ((profile.default_content_setting_values ?? {}) as Record<string, unknown>);
+    defaults.automatic_downloads = 1;
+    profile.default_content_setting_values = defaults;
+    // Also explicitly allow flow.google.com automatic downloads in per-site exceptions.
+    const exceptions = ((profile.content_settings as Record<string, unknown> | undefined)?.exceptions ?? {}) as Record<string, Record<string, unknown>>;
+    const autoDl = (exceptions.automatic_downloads ?? {}) as Record<string, unknown>;
+    autoDl["https://flow.google.com:443,*"] = { setting: 1 };
+    exceptions.automatic_downloads = autoDl;
+    profile.content_settings = { ...((profile.content_settings as Record<string, unknown> | undefined) ?? {}), exceptions };
+    prefs.profile = profile;
+    writeFileSync(prefsFile, JSON.stringify(prefs), "utf8");
+  } catch {}
+}
+
+async function launchChrome(startUrl = FLOW_URL): Promise<void> {
   const chromePath = chromeExecutable();
   mkdirSync(PROFILE_DIR, { recursive: true });
-  // Ensure the dedicated profile never pops up a native "Save As" dialog (e.g. Brave defaults on macOS).
-  const prefsFile = join(PROFILE_DIR, "Default", "Preferences");
-  if (existsSync(prefsFile)) {
-    try {
-      const prefs = JSON.parse(readFileSync(prefsFile, "utf8")) as Record<string, Record<string, unknown>>;
-      const dlDir = join(HOME_DIR, "downloads");
-      mkdirSync(dlDir, { recursive: true });
-      prefs.download = { ...(prefs.download ?? {}), prompt_for_download: false, default_directory: dlDir, directory_upgrade: true };
-      writeFileSync(prefsFile, JSON.stringify(prefs), "utf8");
-    } catch {}
-  }
+  patchProfileDownloadPrefs();
   const child = spawn(
     chromePath,
     [
@@ -94,7 +109,7 @@ async function launchChrome(): Promise<void> {
       "--mute-audio",
       "--disable-extensions",
       "--window-size=1280,820",
-      inEnglish(FLOW_URL),
+      inEnglish(startUrl),
     ],
     { detached: true, stdio: "ignore" },
   );
@@ -135,6 +150,60 @@ export async function getFlowPage(): Promise<Page> {
   await page.goto(inEnglish(FLOW_URL), { waitUntil: "domcontentloaded" });
   await ensureEnglish(page);
   return page;
+}
+
+// Gracefully closes ONLY the dedicated Flow Chrome/Brave instance via CDP Browser.close (never touching the user's
+// everyday browser) and waits for CDP_PORT to free up before relaunching.
+export async function closeFlowBrowser(): Promise<void> {
+  try {
+    if (browser?.isConnected() || (await cdpUp())) {
+      const b = browser?.isConnected() ? browser : await chromium.connectOverCDP(CDP_URL);
+      const cdp = await b.newBrowserCDPSession().catch(() => null);
+      if (cdp) {
+        await cdp.send("Browser.close").catch(() => {});
+        await cdp.detach().catch(() => {});
+      } else {
+        await b.close().catch(() => {});
+      }
+    }
+  } catch {}
+  browser = null;
+  for (let i = 0; i < 20; i++) {
+    if (!(await cdpUp())) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// Soft restart reloads the Flow tab (keeping your open project) with a fresh Playwright/CDP connection;
+// browser restart cleanly closes and relaunches the dedicated Flow Chrome/Brave window (re-applying download prefs)
+// and reopens the exact Flow project URL you were on.
+export async function restartFlowBrowser(relaunchBrowser = false): Promise<{ url: string; relaunched: boolean }> {
+  let savedUrl = FLOW_URL;
+  try {
+    if (browser?.isConnected() || (await cdpUp())) {
+      const page = await getFlowPage();
+      const cur = page.url();
+      if (FLOW_HOSTS.test(cur)) savedUrl = cur;
+    }
+  } catch {}
+
+  if (relaunchBrowser) {
+    await closeFlowBrowser();
+    await launchChrome(savedUrl);
+    browser = await chromium.connectOverCDP(CDP_URL);
+    const page = await getFlowPage();
+    if (savedUrl !== FLOW_URL && !page.url().startsWith(savedUrl.split("?")[0])) {
+      await page.goto(inEnglish(savedUrl), { waitUntil: "domcontentloaded" }).catch(() => {});
+    }
+    await ensureEnglish(page);
+    return { url: page.url(), relaunched: true };
+  }
+
+  // Soft restart: reload the active Flow page cleanly in English (without closing Chrome) so stale SPA/download state resets.
+  const page = await getFlowPage();
+  await page.goto(inEnglish(savedUrl), { waitUntil: "domcontentloaded" });
+  await ensureEnglish(page);
+  return { url: page.url(), relaunched: false };
 }
 
 // Reloads Flow in English when it is showing in another language (a page the user opened by hand, or Flow redirecting

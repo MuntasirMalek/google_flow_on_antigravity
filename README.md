@@ -12,7 +12,8 @@ Antigravity (/flow) ──stdio──> flow-mcp ──CDP (port 9333)──> Ded
 
 ## Key Features & Enhancements
 
-- **`/flow` & `/flow-reset` Antigravity Skills included ([skills/flow/SKILL.md](skills/flow/SKILL.md), [skills/flow-reset/SKILL.md](skills/flow-reset/SKILL.md)):** Type `/flow ...` (or just mention `flow`) in Antigravity chat to generate videos/images, set global rules, or check credits — and `/flow-reset` anytime to clear saved global defaults.
+- **`/flow`, `/flow-reset`, `/flow-stop`, & `/flow-restart` Antigravity Skills included ([skills/flow/SKILL.md](skills/flow/SKILL.md), [skills/flow-reset/SKILL.md](skills/flow-reset/SKILL.md), [skills/flow-stop/SKILL.md](skills/flow-stop/SKILL.md), [skills/flow-restart/SKILL.md](skills/flow-restart/SKILL.md)):** Generate videos/images, set or reset global rules, abort stuck runs instantly (`/flow-stop`), or reload/relaunch the dedicated Flow browser cleanly (`/flow-restart`) straight from chat or Flow Studio.
+- **Self-Healing Browser-Level CDP Downloads & Circuit Breaker:** Uses a browser-level CDP download monitor (`Browser.downloadWillBegin` / `Browser.downloadProgress`) plus automatic `automatic_downloads` Chrome permissions so multi-file batches (50+ files) never trigger browser blocks or 30-minute hangs. Detects Flow upscale errors and canceled downloads immediately, auto-reloads the Flow tab on retry, and trips a circuit breaker after 4 consecutive download failures so generated media stays safe in Flow for `flow_download`.
 - **Parallel Normal-Composer Generation (automatic up to 4, Flow Agent OFF):** Automatically overlaps up to 4 independent video or image submissions in Flow simultaneously with human-paced staggers (`FLOW_MCP_SUBMIT_STAGGER_S`), matching finished out-of-order tiles back to exact scenes via `Reuse prompt`, while keeping `chain_previous` / `reference_previous` strictly serial (override `concurrency: 1–4` anytime via `flow_defaults` or per call).
 - **Unlimited `quantity` (`1–100` takes per prompt):** Flow's UI caps a single submission at `x4`. Asking for `quantity: 10` (images or videos) automatically splits into parallel `x4 + x4 + x2` batches and numbers outputs cleanly as `scene-01-v1` … `scene-01-v10`.
 - **Global Rules (`flow_defaults`) + Ask-Only-What's-Missing Enforcement:** Save any subset of favorite rules once in `~/.flow-mcp/defaults.json` (e.g., *"always use Omni 1.1 Flash, gen 360p, download 720p, 3 parallel"*). `flow_generate` merges your global rules with explicit per-call overrides and **refuses to guess** any unset required setting — so the assistant asks **only** for settings you haven't locked globally, along with a multi-select prompt letting you save none, all, or only specific individual settings as global defaults.
@@ -54,10 +55,10 @@ cd google_flow_on_antigravity
 npm install && npm run build
 ```
 
-### 2. Install `/flow` and `/flow-reset` slash commands in Antigravity
+### 2. Install `/flow`, `/flow-reset`, `/flow-stop`, and `/flow-restart` slash commands in Antigravity
 ```bash
 mkdir -p ~/.gemini/config/skills
-cp -R skills/flow skills/flow-reset ~/.gemini/config/skills/
+cp -R skills/flow skills/flow-reset skills/flow-stop skills/flow-restart ~/.gemini/config/skills/
 ```
 
 ### 3. Sign in once (persistent, zero popups)
@@ -108,6 +109,12 @@ Refresh MCP servers in Antigravity (**Skills & Customizations → MCP Servers**)
   > `/flow-reset` *(clears all saved global rules)*
   > `/flow-reset video` or `/flow-reset image download_quality` *(clears a specific scope or field)*
 
+- **Stop or restart stuck runs anytime (Chat, Studio UI, or Terminal):**
+  > `/flow-stop` *(aborts running & queued jobs and unlocks the Flow tab immediately)*
+  > `/flow-restart` *(stops stuck jobs, resets CDP downloads, and reloads your Flow project tab)*
+  > `/flow-restart browser` *(cleanly closes & relaunches the dedicated Flow browser and reopens your project)*
+  > Terminal: `npm run stop` · `npm run restart` · `npm run restart:browser`
+
 ---
 
 ## Local Control Panel (Flow Studio)
@@ -130,7 +137,7 @@ Both **Shots** and **Frames** tabs include **Quantity** (with `>4` automatic par
 | `flow_defaults` | `get`, `set`, or `clear` persistent global rules (`~/.flow-mcp/defaults.json`) for video, image, and concurrency |
 | `flow_generate` | Queue videos/images in normal composer (Agent off) with `quantity` (`1–100`, auto-splitting `>4` into parallel `x4` batches), `concurrency` (`1–4`), `download_quality` (`original`/`720p`/`1080p`/`upscaled`), and hard validation for unset settings |
 | `flow_wait` | Wait for queued jobs or slow `task_id`s and return file paths & status |
-| `flow_cancel` / `flow_retry` | Cancel queued jobs or retry failed jobs / failed scenes |
+| `flow_cancel` / `flow_stop` / `flow_restart` / `flow_retry` | Cancel queued (or `force: true` running) jobs, abort all active runs, reload/relaunch Flow cleanly, or retry failed jobs |
 | `flow_assets` / `flow_download` / `flow_trash` | List, download (free, incl. collections/upscales), or move project assets to Trash/Bin |
 | `flow_agent_images` | Fast image batch (up to 50 scenes) via Flow Agent mode, downloaded as one ZIP |
 | `flow_edit` / `flow_continue` | Video-to-video restyle or frame-exact / likeness-locked continuation |

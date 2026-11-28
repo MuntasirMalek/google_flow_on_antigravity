@@ -2,6 +2,39 @@ import { randomUUID } from "node:crypto";
 
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
+export class FlowAbortedError extends Error {
+  constructor(message = "Stopped by user.") {
+    super(message);
+    this.name = "FlowAbortedError";
+  }
+}
+
+export function isAbortError(err: unknown): boolean {
+  return err instanceof FlowAbortedError || (err instanceof Error && err.name === "AbortError");
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const reason = typeof signal.reason === "string" && signal.reason.trim() ? signal.reason : "Stopped by user.";
+  throw new FlowAbortedError(reason);
+}
+
+export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new FlowAbortedError(typeof signal.reason === "string" ? signal.reason : "Stopped by user."));
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new FlowAbortedError(typeof signal?.reason === "string" ? signal.reason : "Stopped by user."));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export interface SceneParams {
   prompt: string;
   type: "video" | "image";
@@ -56,8 +89,15 @@ export interface Job {
   finishedAt?: string;
 }
 
-export type JobRunner = (job: Job) => Promise<string[]>;
-export type BatchRunner = (jobs: Job[], concurrency: number) => Promise<void>;
+export type JobRunner = (job: Job, signal: AbortSignal) => Promise<string[]>;
+export type BatchRunner = (jobs: Job[], concurrency: number, signal: AbortSignal) => Promise<void>;
+
+export interface StopSummary {
+  stopped_running: number;
+  cancelled_queued: number;
+  cleared_finished: number;
+  stopped_ids: string[];
+}
 
 // Flow is driven like a careful person would: by default one generation at a time, with a
 // randomised pause between them. Opt-in concurrency (2-4) overlaps independent scenes in Flow's
@@ -87,6 +127,8 @@ export class JobQueue {
   private jobs = new Map<string, Job>();
   private working = false;
   private lastFinished = 0;
+  private currentAbort: AbortController | null = null;
+  private runEpoch = 0;
   pausedReason: string | null = null;
 
   constructor(
@@ -134,20 +176,91 @@ export class JobQueue {
     return job;
   }
 
-  cancel(id: string): Job | undefined {
+  cancel(id: string, force = false): Job | undefined {
     const job = this.jobs.get(id);
-    if (job && job.status === "queued") {
+    if (!job) return undefined;
+    if (job.status === "queued") {
       job.status = "cancelled";
+      job.progress = undefined;
       job.finishedAt = new Date().toISOString();
+      return job;
+    }
+    if (job.status === "running") {
+      if (!force) {
+        throw new Error(
+          `Job ${id} is currently running. Pass force: true to abort it, or call flow_stop to stop all running & queued jobs cleanly.`,
+        );
+      }
+      // Abort the active worker cycle so the running job (and any sibling batch slot sharing the Flow tab) stops promptly.
+      this.stopAll(`Cancelled job ${id}`, false);
+      return job;
     }
     return job;
+  }
+
+  // Immediately aborts any running generation/download/pacing wait, cancels all queued & running jobs,
+  // and releases the Flow tab lock so flow_assets / flow_download / flow_restart / flow_generate can run right away.
+  stopAll(reason = "Stopped by user", clearFinished = false): StopSummary {
+    this.runEpoch++;
+    const ctrl = this.currentAbort;
+    this.currentAbort = null;
+    if (ctrl && !ctrl.signal.aborted) ctrl.abort(reason);
+    this.pausedReason = null;
+    this.working = false;
+    this.lastFinished = 0;
+
+    const now = new Date().toISOString();
+    let stopped_running = 0;
+    let cancelled_queued = 0;
+    const stopped_ids: string[] = [];
+
+    for (const job of this.jobs.values()) {
+      if (job.status === "running" || job.status === "queued") {
+        if (job.status === "running") stopped_running++;
+        else cancelled_queued++;
+        job.status = "cancelled";
+        job.progress = undefined;
+        job.note = [job.note, reason].filter(Boolean).join(" · ");
+        job.finishedAt = now;
+        stopped_ids.push(job.id);
+      }
+    }
+
+    let cleared_finished = 0;
+    if (clearFinished) {
+      for (const [id, job] of this.jobs.entries()) {
+        if (job.status === "done" || job.status === "failed" || job.status === "cancelled") {
+          this.jobs.delete(id);
+          cleared_finished++;
+        }
+      }
+    }
+
+    return { stopped_running, cancelled_queued, cleared_finished, stopped_ids };
+  }
+
+  clearHistory(): number {
+    let cleared = 0;
+    for (const [id, job] of this.jobs.entries()) {
+      if (job.status === "done" || job.status === "failed" || job.status === "cancelled") {
+        this.jobs.delete(id);
+        cleared++;
+      }
+    }
+    return cleared;
   }
 
   private async work(): Promise<void> {
     if (this.working) return;
     this.working = true;
+    const myEpoch = this.runEpoch;
+    const ctrl = new AbortController();
+    this.currentAbort = ctrl;
+    const signal = ctrl.signal;
+
     try {
       for (;;) {
+        if (myEpoch !== this.runEpoch || signal.aborted) return;
         const queued = this.list().filter((j) => j.status === "queued");
         const job = queued[0];
         if (!job) return;
@@ -156,10 +269,17 @@ export class JobQueue {
           const remaining = this.lastFinished + pause - Date.now();
           if (remaining > 0) {
             this.pausedReason = `pacing: next generation in ${Math.ceil(remaining / 1000)}s`;
-            await new Promise((r) => setTimeout(r, remaining));
-            this.pausedReason = null;
+            try {
+              await sleepAbortable(remaining, signal);
+            } catch (err) {
+              if (isAbortError(err)) return;
+              throw err;
+            } finally {
+              if (myEpoch === this.runEpoch) this.pausedReason = null;
+            }
           }
         }
+        if (myEpoch !== this.runEpoch || signal.aborted) return;
         if (job.status !== "queued") continue;
 
         // Collect a contiguous run of independent parallel-eligible jobs so one coordinator drives Flow's composer
@@ -178,8 +298,9 @@ export class JobQueue {
           }
           if (run.length >= 2) {
             try {
-              await this.batchRunner(run, cap);
+              await this.batchRunner(run, cap, signal);
             } catch (err) {
+              if (isAbortError(err) || myEpoch !== this.runEpoch || signal.aborted) return;
               const msg = err instanceof Error ? err.message : String(err);
               const now = new Date().toISOString();
               for (const j of run) {
@@ -191,6 +312,7 @@ export class JobQueue {
                 }
               }
             }
+            if (myEpoch !== this.runEpoch || signal.aborted) return;
             this.lastFinished = Date.now();
             continue;
           }
@@ -199,10 +321,12 @@ export class JobQueue {
         job.status = "running";
         job.attempts++;
         try {
-          job.files = await this.runner(job);
+          job.files = await this.runner(job, signal);
+          if (myEpoch !== this.runEpoch || signal.aborted) return;
           job.status = "done";
           job.error = undefined;
         } catch (err) {
+          if (isAbortError(err) || myEpoch !== this.runEpoch || signal.aborted) return;
           job.error = err instanceof Error ? err.message : String(err);
           // Failed tiles are already retried inside Flow (its own Retry button); only an agent that produced nothing
           // is re-queued here. Timeouts are never retried automatically: they may still have spent credits.
@@ -213,7 +337,11 @@ export class JobQueue {
         this.lastFinished = Date.now();
       }
     } finally {
-      this.working = false;
+      if (myEpoch === this.runEpoch) {
+        this.working = false;
+        if (this.currentAbort === ctrl) this.currentAbort = null;
+        this.pausedReason = null;
+      }
     }
   }
 }

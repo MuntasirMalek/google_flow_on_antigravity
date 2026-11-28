@@ -1176,7 +1176,13 @@ function renderStatus(st) {
   const text = !f.signedIn ? "Not signed in" : !f.inProject ? "No project open" : active ? "Working" : "Ready";
   if (f.credits_remaining !== undefined) renderStatus.credits = f.credits_remaining;
   if (f.plan) renderStatus.plan = f.plan;
-  $("#status").innerHTML = `<span class="pill"><i class="tally ${cls}"></i>${text}</span>${renderStatus.plan ? `<span class="pill">${esc(renderStatus.plan)}</span>` : ""}${renderStatus.credits !== undefined ? `<span class="pill">${renderStatus.credits.toLocaleString()} credits</span>` : ""}`;
+  $("#status").innerHTML = `<span class="pill"><i class="tally ${cls}"></i>${text}</span>${renderStatus.plan ? `<span class="pill">${esc(renderStatus.plan)}</span>` : ""}${renderStatus.credits !== undefined ? `<span class="pill">${renderStatus.credits.toLocaleString()} credits</span>` : ""}${active ? `<button class="btn small" style="background:var(--bad);color:#fff" id="btnStopAll">⏹ Stop</button>` : ""}<button class="btn small ghost" id="btnSoftRestart" title="Stop stuck jobs & reload Flow tab">↻ Restart Flow</button><button class="btn small ghost" id="btnBrowserRestart" title="Close and relaunch dedicated Flow Chrome/Brave browser">⟲ Relaunch Browser</button>`;
+  const bStop = $("#btnStopAll");
+  if (bStop) bStop.onclick = async () => { bStop.disabled = true; try { const r = await api("stop", {}); toast(r.note || "Stopped Flow jobs"); poll(true); } catch (err) { toast(err.message, true); bStop.disabled = false; } };
+  const bSoft = $("#btnSoftRestart");
+  if (bSoft) bSoft.onclick = async () => { bSoft.disabled = true; toast("Restarting Flow tab…"); try { await api("restart", { mode: "soft" }); toast("Flow tab reloaded cleanly"); poll(true); } catch (err) { toast(err.message, true); bSoft.disabled = false; } };
+  const bHard = $("#btnBrowserRestart");
+  if (bHard) bHard.onclick = async () => { if (!confirm("Relaunch the dedicated Flow browser window? Any running jobs will be stopped, and your Flow project will reopen automatically.")) return; bHard.disabled = true; toast("Relaunching Flow browser…"); try { await api("restart", { mode: "browser" }); toast("Flow browser relaunched"); poll(true); } catch (err) { toast(err.message, true); bHard.disabled = false; } };
   $("#hint").innerHTML = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
   $("#pacing").innerHTML = st.pacing ? `<div class="pacing">⏱ ${esc(st.pacing)}</div>` : "";
   const jobs = [...st.jobs].reverse();

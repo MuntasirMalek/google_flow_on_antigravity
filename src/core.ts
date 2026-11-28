@@ -9,7 +9,7 @@ import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js"
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
 import { clearDefaults, DEFAULTS_FILE, loadDefaults, resolveSceneSettings, splitQuantity, updateDefaults } from "./defaults.js";
-import { characterLook, createCharacter, createProject, downloadAsset, downloadCollection, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration, runParallelGenerations } from "./flow.js";
+import { characterLook, createCharacter, createProject, downloadAsset, downloadCollection, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, resetAndRestartFlow, resetDownloadSession, runAgentBatch, runContinue, runEdit, runGeneration, runParallelGenerations } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
 import { BIN, COMPUTER, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -171,7 +171,20 @@ export const shapes = {
     job_ids: z.array(z.string()).optional().describe("Job ids from a queued call, or the task_id of a call that answered still_working. Default: every queued job."),
     timeout_seconds: z.number().int().min(5).max(900).default(40).describe("An MCP call returns after at most 40 s whatever this says, so call again until finished is true."),
   },
-  cancel: { job_id: z.string() },
+  cancel: {
+    job_id: z.string(),
+    force: z.boolean().default(false).describe("Set true to abort a currently running job (stops the active generation/download on the Flow tab)."),
+  },
+  stop: {
+    clear_finished: z.boolean().default(false).describe("Also clear done, failed, and cancelled jobs from the queue list."),
+  },
+  restart: {
+    mode: z
+      .enum(["soft", "browser"])
+      .default("soft")
+      .describe("'soft' (default) stops any running/queued jobs, resets the CDP download session, and reloads the Flow project tab (~3s). 'browser' cleanly closes and relaunches the dedicated Flow Chrome/Brave browser (refreshing automatic download permissions) and reopens your exact Flow project (~8s)."),
+    clear_jobs: z.boolean().default(false).describe("Also clear old job history from the queue after stopping."),
+  },
   retry: { job_ids: z.array(z.string()).optional().describe("Jobs to re-queue. Default: every failed job.") },
   assets: { kind: z.enum(["image", "video", "scene"]).optional() },
   download: {
@@ -480,6 +493,8 @@ export interface Core {
   generate(a: Args<"generate">): Promise<unknown>;
   wait(a: Args<"wait">): Promise<unknown>;
   cancel(a: Args<"cancel">): Promise<unknown>;
+  stop(a: Args<"stop">): Promise<unknown>;
+  restart(a: Args<"restart">): Promise<unknown>;
   retry(a: Args<"retry">): Promise<unknown>;
   assets(a: Args<"assets">): Promise<unknown>;
   download(a: Args<"download">): Promise<unknown>;
@@ -551,15 +566,15 @@ export class LocalCore implements Core {
   }
 
   private queue: JobQueue = new JobQueue(
-    async (job) => {
+    async (job, signal) => {
       await this.prepareJobInputs(job);
       if (job.params.continue_from) return runContinue(job);
       if (job.params.agent_scenes) return runAgentBatch(job);
       if (job.params.edit_asset) return runEdit(job);
-      return runGeneration(job);
+      return runGeneration(job, signal);
     },
-    async (jobs, concurrency) => {
-      await runParallelGenerations(jobs, concurrency, (job) => this.prepareJobInputs(job));
+    async (jobs, concurrency, signal) => {
+      await runParallelGenerations(jobs, concurrency, (job) => this.prepareJobInputs(job), signal);
     },
   );
 
@@ -688,10 +703,43 @@ export class LocalCore implements Core {
     };
   }
 
-  async cancel({ job_id }: Args<"cancel">) {
-    const job = this.queue.cancel(job_id);
+  async cancel({ job_id, force }: Args<"cancel">) {
+    const job = this.queue.cancel(job_id, force);
     if (!job) throw new Error(`No job with id ${job_id}. Use flow_status to list jobs.`);
+    if (force) await resetDownloadSession().catch(() => {});
     return jobView(job);
+  }
+
+  async stop({ clear_finished }: Args<"stop">) {
+    const summary = this.queue.stopAll("Stopped by user", clear_finished);
+    await resetDownloadSession().catch(() => {});
+    return {
+      stopped: true,
+      ...summary,
+      note:
+        summary.stopped_running > 0
+          ? "Stopped active Flow jobs and released the Flow tab lock. Any images/videos already rendered inside Flow are still safe in your project and can be fetched with flow_assets / flow_download (0 credits)."
+          : summary.cancelled_queued > 0
+            ? "Cancelled all queued jobs."
+            : "No running or queued jobs were active.",
+    };
+  }
+
+  async restart({ mode, clear_jobs }: Args<"restart">) {
+    const stopped = this.queue.stopAll(`Restarted Flow (${mode})`, clear_jobs);
+    // Give any aborted polling loop a brief beat to unwind before reloading/closing the browser.
+    await new Promise((r) => setTimeout(r, 350));
+    const restarted = await resetAndRestartFlow(mode);
+    return {
+      restarted: true,
+      mode,
+      ...restarted,
+      stopped,
+      note:
+        mode === "browser"
+          ? "Cleanly relaunched the dedicated Flow browser with automatic multi-file downloads enabled and reopened your project."
+          : "Stopped stuck jobs, reset the CDP download session, and reloaded your Flow project tab cleanly.",
+    };
   }
 
   async retry({ job_ids }: Args<"retry">) {

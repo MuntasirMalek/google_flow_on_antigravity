@@ -4,8 +4,8 @@ import { cpus, homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { promisify } from "node:util";
 import type { CDPSession, Locator, Page } from "playwright-core";
-import { CAST_DIR, HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
-import type { Job } from "./queue.js";
+import { CAST_DIR, HOME_DIR, getBrowser, getFlowPage, inEnglish, restartFlowBrowser } from "./chrome.js";
+import { isAbortError, sleepAbortable, throwIfAborted, type Job } from "./queue.js";
 import { extractZip } from "./platform.js";
 
 const runExec = promisify(execFile);
@@ -62,7 +62,7 @@ const IMAGE_TIMEOUT_MS = 3 * 60_000;
 const VIDEO_TIMEOUT_MS = 12 * 60_000;
 const FAILURE_TEXT = /failed|couldn.t|unable/i;
 
-const pause = (page: Page, ms: number) => page.waitForTimeout(ms);
+const pause = (_page: Page, ms: number, signal?: AbortSignal) => sleepAbortable(ms, signal);
 
 // `detailed` opens the account panel to read the balance, so it must not run while a generation is driving the page.
 export async function getFlowState(detailed = false): Promise<FlowState> {
@@ -371,13 +371,15 @@ export async function freshMedia(page: Page, before: string[], kind?: MediaKind)
   return [...new Set(ours.map((t) => t.id!))];
 }
 
-async function waitForNewMedia(page: Page, before: string[], count: number, timeoutMs: number, job?: Job, kind?: MediaKind): Promise<string[]> {
+async function waitForNewMedia(page: Page, before: string[], count: number, timeoutMs: number, job?: Job, kind?: MediaKind, signal?: AbortSignal): Promise<string[]> {
   const deadline = Date.now() + timeoutMs;
   let retriesLeft = job?.params.retries ?? 1;
   let failures = 0;
   let seen = "";
   while (Date.now() < deadline) {
-    await pause(page, 2000);
+    throwIfAborted(signal);
+    await pause(page, 2000, signal);
+    throwIfAborted(signal);
     const fresh = await freshMedia(page, before, kind);
     // New tiles are listed first, so anything beyond the requested count is not ours.
     if (fresh.length >= count) {
@@ -728,12 +730,14 @@ export async function downloadMedia(
   job?: Job,
   variantStart?: number,
   fallbackTitle?: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
+  throwIfAborted(signal);
   // Let a freshly finished or renamed tile settle, then locate it without blindly scrolling it off-screen.
-  await pause(page, 1200);
+  await pause(page, 1200, signal);
   let tile = await scrollToTile(page, mediaId, fallbackTitle);
   if (!tile) {
-    await pause(page, 2500);
+    await pause(page, 2500, signal);
     tile = await scrollToTile(page, mediaId, fallbackTitle);
   }
   if (!tile) {
@@ -746,7 +750,7 @@ export async function downloadMedia(
   // Grab the title NOW, while the id still resolves, so retries can re-find this exact tile even if the
   // virtualised grid unmounts and remounts it between steps.
   const title = fallbackTitle ?? ((await tile.getAttribute("aria-label").catch(() => null)) || undefined);
-  return downloadTile(page, tileByIdOrTitle(page, mediaId, title), targetStem, quality, title, job, variantStart);
+  return downloadTile(page, tileByIdOrTitle(page, mediaId, title), targetStem, quality, title, job, variantStart, signal);
 }
 
 type TileResolver = () => Promise<Locator>;
@@ -764,31 +768,97 @@ function tileByIdOrTitle(page: Page, id: string, title?: string): TileResolver {
 }
 
 const DOWNLOAD_DIR = join(HOME_DIR, "downloads");
-let downloadsReady = false;
-const downloadSessions = new WeakMap<Page, CDPSession>();
+
+interface CdpDownloadEntry {
+  guid: string;
+  suggestedFilename: string;
+  url: string;
+  state: "inProgress" | "completed" | "canceled";
+  receivedBytes: number;
+  totalBytes: number;
+  startedAt: number;
+  updatedAt: number;
+}
+
+let browserDownloadCdp: CDPSession | null = null;
+const cdpDownloads = new Map<string, CdpDownloadEntry>();
+
+function pruneCdpDownloads(): void {
+  const cutoff = Date.now() - 15 * 60_000;
+  for (const [guid, entry] of cdpDownloads.entries()) {
+    if (entry.updatedAt < cutoff) cdpDownloads.delete(guid);
+  }
+}
+
+function attachDownloadListeners(cdp: CDPSession): void {
+  cdp.on("Browser.downloadWillBegin", (ev: { guid: string; url?: string; suggestedFilename?: string }) => {
+    const now = Date.now();
+    cdpDownloads.set(ev.guid, {
+      guid: ev.guid,
+      suggestedFilename: ev.suggestedFilename ?? "",
+      url: ev.url ?? "",
+      state: "inProgress",
+      receivedBytes: 0,
+      totalBytes: 0,
+      startedAt: now,
+      updatedAt: now,
+    });
+    pruneCdpDownloads();
+  });
+  cdp.on("Browser.downloadProgress", (ev: { guid: string; totalBytes?: number; receivedBytes?: number; state: "inProgress" | "completed" | "canceled" }) => {
+    const now = Date.now();
+    const cur = cdpDownloads.get(ev.guid) ?? {
+      guid: ev.guid,
+      suggestedFilename: "",
+      url: "",
+      state: ev.state,
+      receivedBytes: 0,
+      totalBytes: 0,
+      startedAt: now,
+      updatedAt: now,
+    };
+    cur.state = ev.state;
+    if (typeof ev.receivedBytes === "number") cur.receivedBytes = ev.receivedBytes;
+    if (typeof ev.totalBytes === "number") cur.totalBytes = ev.totalBytes;
+    cur.updatedAt = now;
+    cdpDownloads.set(ev.guid, cur);
+  });
+}
+
+// Tears down any cached browser CDP download session (called on flow_restart or before download recovery retries).
+export async function resetDownloadSession(): Promise<void> {
+  const old = browserDownloadCdp;
+  browserDownloadCdp = null;
+  cdpDownloads.clear();
+  if (old) await old.detach().catch(() => {});
+}
 
 // Playwright keeps a download in a per-connection temp file it can delete from under us; pointing Chrome itself at a
-// directory we own makes the bytes ours the moment they land.
-async function useOwnDownloadDir(page: Page): Promise<void> {
-  // Re-assert before every download using ONE cached CDP session per page (WeakMap). Never leak a new session per
-  // download, and never detach immediately — detaching cancels Browser.setDownloadBehavior in Chromium/Brave and
-  // causes downloads to stall as hidden .com.brave.Browser.* temp files in ~/Downloads.
+// directory we own via ONE browser-level CDP session makes the bytes ours the moment they land AND gives us live
+// Browser.downloadWillBegin / Browser.downloadProgress events so canceled or stalled downloads fail fast instead of
+// hanging for 10+ minutes.
+async function useOwnDownloadDir(page: Page, forceReset = false): Promise<void> {
   mkdirSync(DOWNLOAD_DIR, { recursive: true });
   const params = { behavior: "allowAndName" as const, downloadPath: DOWNLOAD_DIR, eventsEnabled: true };
-  let cdp = downloadSessions.get(page);
-  if (cdp) {
+  if (forceReset) await resetDownloadSession();
+  if (browserDownloadCdp) {
     try {
-      await cdp.send("Browser.setDownloadBehavior", params);
-      downloadsReady = true;
+      await browserDownloadCdp.send("Browser.setDownloadBehavior", params);
       return;
     } catch {
-      downloadSessions.delete(page);
+      await resetDownloadSession();
     }
   }
-  cdp = await page.context().newCDPSession(page);
-  downloadSessions.set(page, cdp);
+  let cdp: CDPSession;
+  try {
+    const b = await getBrowser();
+    cdp = await b.newBrowserCDPSession();
+  } catch {
+    cdp = await page.context().newCDPSession(page);
+  }
+  attachDownloadListeners(cdp);
+  browserDownloadCdp = cdp;
   await cdp.send("Browser.setDownloadBehavior", params).catch(() => {});
-  downloadsReady = true;
 }
 
 // Chrome's own Downloads folder, where files land whenever the override above has been reset out from under us.
@@ -801,7 +871,8 @@ function downloadsNow(): Set<string> {
   return seen;
 }
 
-const FLOW_UUID_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Match both bare UUIDs (Chrome's allowAndName) and UUIDs with extensions (Chrome fallback in ~/Downloads).
+const FLOW_UUID_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\.[a-z0-9]{2,5})?$/i;
 const FLOW_DOWNLOAD_NAME = /_[0-9a-f]{8}(?:_(?:720p|1080p|2k|4k))?\.(?:mp4|jpe?g|png|webp|gif|zip)$/i;
 const normAlphaNum = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
@@ -818,36 +889,130 @@ export function isFlowDownloadName(filename: string, expectedHint?: string): boo
   return !expectedHint && /\.(?:mp4|jpe?g|png|webp|gif|zip)$/i.test(filename);
 }
 
-// Waits for a file to finish arriving in our download directory and returns it.
-async function waitForDownloadedFile(page: Page, before: Set<string>, timeoutMs: number, expectedHint?: string): Promise<string> {
+async function detectFlowDownloadSnackbar(page: Page): Promise<{ error?: string; active?: boolean }> {
+  try {
+    const texts = await page
+      .locator('[role="alert"], .mat-mdc-snack-bar-label, .cdk-overlay-container [role="status"]')
+      .allInnerTexts()
+      .catch(() => [] as string[]);
+    const joined = texts.map((t) => t.replace(/\s+/g, " ").trim()).filter(Boolean).join(" | ");
+    if (!joined) return {};
+    if (/failed|couldn.t|unable|something went wrong|try again|error/i.test(joined)) return { error: joined };
+    if (/upscal|prepar|download|generat|processing/i.test(joined)) return { active: true };
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+interface DownloadWaitOptions {
+  noStartTimeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+// Waits for a file to finish arriving via CDP download events or disk polling and returns its path.
+// Fails fast on Chrome download cancellation, Flow error snackbars, or prolonged silence with no active upscale/transfer.
+async function waitForDownloadedFile(
+  page: Page,
+  before: Set<string>,
+  timeoutMs: number,
+  expectedHint?: string,
+  opts: DownloadWaitOptions = {},
+): Promise<string> {
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
+  const noStartTimeoutMs = Math.min(timeoutMs, opts.noStartTimeoutMs ?? timeoutMs);
+  const signal = opts.signal;
   let stable: { path: string; size: number } | undefined;
+  let downloadBegan = false;
+  let lastTransferAt = startedAt;
+  let pollCount = 0;
+
   while (Date.now() < deadline) {
+    throwIfAborted(signal);
     // Every half second: keeps background disk polling light while catching finished downloads promptly.
-    await pause(page, 500);
-    // Prefer our isolated download folder first; only inspect the shared ~/Downloads folder with Flow filename
-    // filtering so unrelated personal downloads are never hijacked.
+    await pause(page, 500, signal);
+    throwIfAborted(signal);
+    pollCount++;
+
+    // 1. Check live CDP download events first (instant completion & instant cancel detection).
+    for (const ev of cdpDownloads.values()) {
+      if (ev.startedAt < startedAt - 2500) continue;
+      if (ev.state === "inProgress") {
+        downloadBegan = true;
+        lastTransferAt = Math.max(lastTransferAt, ev.updatedAt);
+      } else if (ev.state === "completed") {
+        downloadBegan = true;
+        const cdpFile = join(DOWNLOAD_DIR, ev.guid);
+        if (existsSync(cdpFile) && !before.has(`${DOWNLOAD_DIR}/${ev.guid}`)) {
+          const sz = statSync(cdpFile).size;
+          if (sz > 0) return cdpFile;
+        }
+      } else if (ev.state === "canceled") {
+        throw new Error(
+          `Chrome canceled the Flow download${ev.suggestedFilename ? ` (${ev.suggestedFilename})` : ""}. ` +
+            `Will reset download session and retry.`,
+        );
+      }
+    }
+
+    // 2. Check our isolated download folder first; only inspect shared ~/Downloads with Flow filename filtering.
     const candidates: string[] = [];
+    let sawInFlightCrdownload = false;
     for (const dir of [DOWNLOAD_DIR, SYSTEM_DOWNLOADS]) {
       if (!existsSync(dir)) continue;
       const shared = dir === SYSTEM_DOWNLOADS;
       for (const f of readdirSync(dir)) {
-        if (before.has(`${dir}/${f}`) || f.endsWith(".crdownload") || f.startsWith(".")) continue;
+        if (before.has(`${dir}/${f}`)) continue;
+        if (f.endsWith(".crdownload") || f.startsWith(".com.google.Chrome.") || f.startsWith(".com.brave.Browser.")) {
+          if (!shared) sawInFlightCrdownload = true;
+          continue;
+        }
+        if (f.startsWith(".")) continue;
         if (shared && !isFlowDownloadName(f, expectedHint)) continue;
         const full = join(dir, f);
-        if (shared) {
-          const st = statSync(full);
-          if (st.mtimeMs < startedAt - 5000) continue;
+        let st;
+        try {
+          st = statSync(full);
+        } catch {
+          continue;
         }
+        if (shared && st.mtimeMs < startedAt - 5000) continue;
         candidates.push(full);
       }
       if (candidates.length) break;
     }
+    if (sawInFlightCrdownload) {
+      downloadBegan = true;
+      lastTransferAt = Date.now();
+    }
     for (const path of candidates) {
-      const size = statSync(path).size;
+      let size = 0;
+      try {
+        size = statSync(path).size;
+      } catch {
+        continue;
+      }
       if (stable?.path === path && stable.size === size && size > 0) return path;
       stable = { path, size };
+    }
+
+    // 3. Periodically check Flow's snackbar/toast status so silent upscale failures or dead clicks fail fast.
+    if (!downloadBegan && pollCount % 4 === 0) {
+      const snack = await detectFlowDownloadSnackbar(page);
+      if (snack.error && Date.now() - startedAt >= 3000) {
+        throw new Error(`Flow reported a download/upscale error: "${snack.error}".`);
+      }
+      if (!snack.active && Date.now() - startedAt >= noStartTimeoutMs) {
+        throw new Error(
+          `Flow did not start the download within ${Math.round(noStartTimeoutMs / 1000)}s (no file or upscale progress detected).`,
+        );
+      }
+    }
+
+    // If a download began via Chrome/CDP but stalled with zero progress for 90s, fail so retry can recover.
+    if (downloadBegan && !candidates.length && Date.now() - lastTransferAt >= 90_000) {
+      throw new Error("Chrome download stalled for 90s without completing.");
     }
   }
   throw new Error("Flow started the download but no file arrived in either the tool's folder or ~/Downloads.");
@@ -1243,14 +1408,54 @@ async function renameTile(page: Page, tile: Locator, title: string): Promise<boo
   }
 }
 
-async function downloadTile(page: Page, target: Locator | TileResolver, targetStem: string, quality: DownloadQuality, expectedHint?: string, job?: Job, variantStart?: number): Promise<string[]> {
-  await useOwnDownloadDir(page);
+async function reloadProjectGrid(page: Page, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0] ?? page.url();
+  await page.goto(inEnglish(root), { waitUntil: "domcontentloaded" }).catch(() => {});
+  await pause(page, 2500, signal);
+  await ensureProjectGrid(page);
+}
+
+// Reloads or cleanly relaunches Flow and resets the CDP download session (used by flow_restart).
+export async function resetAndRestartFlow(mode: "soft" | "browser" = "soft"): Promise<{ url: string; relaunched: boolean; flow: FlowState }> {
+  await resetDownloadSession();
+  const res = await restartFlowBrowser(mode === "browser");
+  const page = await getFlowPage();
+  await pause(page, 1800);
+  await dismissOverlays(page).catch(() => {});
+  await useOwnDownloadDir(page, true).catch(() => {});
+  await pauseIdleMedia(page);
+  const flow = await getFlowState(false);
+  return { ...res, flow };
+}
+
+async function downloadTile(
+  page: Page,
+  target: Locator | TileResolver,
+  targetStem: string,
+  quality: DownloadQuality,
+  expectedHint?: string,
+  job?: Job,
+  variantStart?: number,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const resolve: TileResolver = typeof target === "function" ? target : async () => target;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Two attempts instead of three 10-minute blind waits: if attempt 1 stalls or fails, reload Flow's project grid
+  // and reset the browser CDP download session before attempt 2 so stale sessions/websockets self-heal in seconds.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    throwIfAborted(signal);
     try {
+      if (attempt > 0) {
+        if (job) job.progress = "reloading Flow & retrying download";
+        await reloadProjectGrid(page, signal);
+      }
+      await useOwnDownloadDir(page, attempt > 0);
       const tile = await resolve();
       const titleHint = expectedHint ?? ((await tile.getAttribute("aria-label").catch(() => null)) || undefined);
+      const isImageTile =
+        job?.params.type === "image" ||
+        (await tile.evaluate((el) => Boolean(el.querySelector("flow-image-tile")) && !el.querySelector("flow-video-tile")).catch(() => false));
       const before = downloadsNow();
       // Flow only shows a tile's toolbar for a real pointer move over it - Playwright's hover() does not trigger it.
       // The toolbar's "More options" beats a right-click, which can land on the <video> and raise Chrome's own menu.
@@ -1297,8 +1502,11 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
         }
         await wanted.click();
       }
-      // Upscales are rendered on demand, so they can take minutes to appear.
-      const file = await waitForDownloadedFile(page, before, usingUpscale ? 600_000 : 180_000, titleHint);
+      // Smart timeouts: image 2K upscales normally complete in 10-40s; video upscales take longer.
+      // noStartTimeoutMs fails fast when Flow never triggers a download or upscale toast so retry can reload and heal.
+      const maxTimeoutMs = !usingUpscale ? 150_000 : isImageTile ? 210_000 : 420_000;
+      const noStartTimeoutMs = !usingUpscale ? 45_000 : isImageTile ? 90_000 : 180_000;
+      const file = await waitForDownloadedFile(page, before, maxTimeoutMs, titleHint, { noStartTimeoutMs, signal });
       const kind = extensionOf(file);
       let saved: string[];
       if (kind === ".zip") saved = unpackTakes(file, targetStem, variantStart);
@@ -1310,13 +1518,14 @@ async function downloadTile(page: Page, target: Locator | TileResolver, targetSt
       if (quality === "1080p") {
         for (const out of saved) await ensure1080pVideo(out, job);
       }
-      await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape").catch(() => {});
       await scrollToTop(page);
       return saved;
     } catch (err) {
+      if (isAbortError(err)) throw err;
       lastError = err;
       await page.keyboard.press("Escape").catch(() => {});
-      await pause(page, 2000);
+      await pause(page, 1500, signal);
     }
   }
   throw lastError;
@@ -1584,7 +1793,8 @@ async function submitInComposer(
 }
 
 // Drives one generation in the Flow tab and returns the downloaded file paths.
-export async function runGeneration(job: Job): Promise<string[]> {
+export async function runGeneration(job: Job, signal?: AbortSignal): Promise<string[]> {
+  throwIfAborted(signal);
   const state = await getFlowState();
   if (!state.signedIn || !state.inProject) throw new Error(state.hint);
   const page = await getFlowPage();
@@ -1594,7 +1804,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const before = submitted.status === "submitted" ? submitted.before : [];
 
   const variants = s.variants ?? 1;
-  const fresh = await waitForNewMedia(page, before, variants, s.type === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS, job, s.type === "image" ? "image" : "video");
+  const fresh = await waitForNewMedia(page, before, variants, s.type === "image" ? IMAGE_TIMEOUT_MS : VIDEO_TIMEOUT_MS, job, s.type === "image" ? "image" : "video", signal);
   job.progress = undefined;
 
   mkdirSync(s.output_dir, { recursive: true });
@@ -1602,6 +1812,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const offset = s.variant_offset ?? 0;
   const multi = (s.total_quantity ?? fresh.length) > 1 || offset > 0;
   for (const [i, id] of fresh.entries()) {
+    throwIfAborted(signal);
     const variantNum = offset + i + 1;
     const label = multi ? `${s.file_stem}-v${variantNum}` : s.file_stem;
     // Flow names clips itself and reuses those names, so two takes of one scene come back identically titled and
@@ -1611,14 +1822,14 @@ export async function runGeneration(job: Job): Promise<string[]> {
     const tileForRename = (await scrollToTile(page, id)) ?? mediaTile(page, id);
     const renamed = await renameTile(page, tileForRename, newTitle).catch(() => false);
     if (renamed) job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
-    await pause(page, 600);
+    await pause(page, 600, signal);
     const stem = join(s.output_dir, label);
     // A video at rest has no media id, so it is tracked by its title - which the rename just changed. Looking for the
     // old title failed every such download after 30 s ("locator.waitFor: Timeout 30000ms exceeded ... aria-label=
     // <the prompt>", reported by a user, 2026-10-15) while the clip sat finished and renamed in Flow.
     const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
-    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined, renamed ? newTitle : undefined)));
-    await pause(page, 1200);
+    files.push(...(await downloadMedia(page, handle, stem, s.download_quality, job, multi ? variantNum : undefined, renamed ? newTitle : undefined, signal)));
+    await pause(page, 1200, signal);
   }
   await pauseIdleMedia(page);
   return files;
@@ -1641,7 +1852,9 @@ export async function runParallelGenerations(
   jobs: Job[],
   maxConcurrency: number,
   prepareJob: (job: Job) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const state = await getFlowState();
   if (!state.signedIn || !state.inProject) {
     const now = new Date().toISOString();
@@ -1693,6 +1906,7 @@ export async function runParallelGenerations(
   };
 
   while (pending.length || inFlight.length) {
+    throwIfAborted(signal);
     if (page.isClosed()) {
       page = await getFlowPage();
       await ensureProjectGrid(page);
@@ -1702,6 +1916,7 @@ export async function runParallelGenerations(
 
     // 1. Highest priority: keep Flow's parallel render slots full up to effectiveMax before spending time downloading.
     while (activeRenderSlots() < effectiveMax && pending.length) {
+      throwIfAborted(signal);
       const job = pending.shift()!;
       if (job.status !== "queued") continue;
       job.status = "running";
@@ -1739,9 +1954,10 @@ export async function runParallelGenerations(
         job.progress = `rendering (${activeNow} in flight)`;
         if (activeNow < effectiveMax && pending.length) {
           const stagger = SUBMIT_STAGGER_MS * (0.8 + Math.random() * 0.4);
-          await pause(page, Math.round(stagger));
+          await pause(page, Math.round(stagger), signal);
         }
       } catch (err) {
+        if (isAbortError(err)) throw err;
         settingsCache.key = "";
         job.status = "failed";
         job.progress = undefined;
@@ -1753,7 +1969,8 @@ export async function runParallelGenerations(
     if (!inFlight.length) continue;
 
     // 2. Poll the grid for finished tiles, live progress, and errors.
-    await pause(page, 2000);
+    await pause(page, 2000, signal);
+    throwIfAborted(signal);
     await scrollToTop(page);
 
     const progressList = await page
@@ -1858,7 +2075,9 @@ export async function runParallelGenerations(
       const downloadPhaseStart = Date.now();
       const totalToDownload = readyTiles.length;
       let downloadedSoFar = 0;
+      let consecutiveDownloadFailures = 0;
       while (readyTiles.length > 0 && inFlight.length > 0) {
+        throwIfAborted(signal);
         const id = readyTiles.pop()!;
         downloadedSoFar++;
         if (page.isClosed()) {
@@ -1902,7 +2121,7 @@ export async function runParallelGenerations(
             knownIds.add(`title:${newTitle}`);
             job.note = [job.note, `renamed in Flow to ${newTitle}`].filter(Boolean).join(" · ");
           }
-          await pause(page, 400);
+          await pause(page, 400, signal);
           const stem = join(s.output_dir, label);
           const handle = renamed && id.startsWith("title:") ? `title:${newTitle}` : id;
           const downloaded = await downloadMedia(
@@ -1913,15 +2132,19 @@ export async function runParallelGenerations(
             job,
             multi ? variantNum : undefined,
             renamed ? newTitle : undefined,
+            signal,
           );
           job.files.push(...downloaded);
           chosen.receivedCount += Math.max(1, downloaded.length);
+          consecutiveDownloadFailures = 0;
         } catch (err) {
+          if (isAbortError(err)) throw err;
           const msg = err instanceof Error ? err.message : String(err);
           chosen.tileErrors.push(`${label}: ${msg}`);
           job.note = [job.note, `failed ${label}: ${msg}`].filter(Boolean).join(" · ");
           // Count this tile slot as consumed so sibling variants (e.g. v8 after v7) still finish cleanly.
           chosen.receivedCount += 1;
+          consecutiveDownloadFailures++;
         }
         if (chosen.receivedCount >= chosen.expectedVariants) {
           if (chosen.tileErrors.length && job.files.length === 0) {
@@ -1935,7 +2158,29 @@ export async function runParallelGenerations(
           job.finishedAt = new Date().toISOString();
           inFlight.splice(inFlight.indexOf(chosen), 1);
         }
-        await pause(page, 300);
+        // Auto-recovery on consecutive download failures: reload Flow + reset CDP after 2 failures,
+        // and trip circuit breaker after 4 consecutive failures so a broken Chrome download channel never burns hours.
+        if (consecutiveDownloadFailures === 2 && readyTiles.length > 0) {
+          await reloadProjectGrid(page, signal).catch(() => {});
+          await useOwnDownloadDir(page, true).catch(() => {});
+        } else if (consecutiveDownloadFailures >= 4) {
+          const breakerMsg =
+            "Paused downloads after 4 consecutive download failures — your generated media is already saved in Flow. " +
+            "Call flow_restart (mode: 'soft' or 'browser'), then fetch the finished assets with flow_download (0 credits).";
+          const now = new Date().toISOString();
+          for (const rem of inFlight) {
+            if (rem.job.status === "running" || rem.job.status === "queued") {
+              rem.job.status = "failed";
+              rem.job.progress = undefined;
+              rem.job.error = breakerMsg;
+              rem.job.finishedAt = now;
+            }
+          }
+          inFlight.length = 0;
+          readyTiles.length = 0;
+          break;
+        }
+        await pause(page, 300, signal);
       }
       // Credit download/upscale duration back to any remaining in-flight slots (e.g. duplicate-titled videos).
       const dlElapsed = Date.now() - downloadPhaseStart;

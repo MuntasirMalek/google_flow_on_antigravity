@@ -135,12 +135,36 @@ server.registerTool(
 server.registerTool(
   "flow_cancel",
   {
-    title: "Cancel a queued Flow job",
-    description: "Cancel a job that has not started yet. A running generation cannot be cancelled.",
+    title: "Cancel a Flow job",
+    description: "Cancel a queued job, or pass `force: true` to abort a running job. To stop all running and queued jobs at once, use `flow_stop`.",
     inputSchema: shapes.cancel,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   },
   (args) => reply(core.cancel(args)),
+);
+
+server.registerTool(
+  "flow_stop",
+  {
+    title: "Stop all running & queued Flow jobs",
+    description:
+      "Immediately stop/abort all currently running and queued Flow jobs, clear pacing delays, reset the CDP download session, and unlock the Flow tab so flow_assets, flow_download, flow_restart, or new generations can run right away. Any media already generated inside Flow remains safe in your project.",
+    inputSchema: shapes.stop,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  },
+  (args) => reply(core.stop(args)),
+);
+
+server.registerTool(
+  "flow_restart",
+  {
+    title: "Restart Flow tab or Flow browser",
+    description:
+      "Recover from a stuck generation, broken download channel, or sleep-disconnected session without restarting Antigravity. Stops all running/queued jobs, resets the CDP download monitor, and either reloads your Flow project tab (`mode: 'soft'`, default, ~3s) or cleanly closes and relaunches the dedicated Flow Chrome/Brave browser (`mode: 'browser'`, ~8s, re-enabling automatic multi-file downloads and reopening your exact project URL).",
+    inputSchema: shapes.restart,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_restart", core.restart(args))),
 );
 
 server.registerTool(
